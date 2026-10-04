@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Qyntra browser verification</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <pre id="test-results">RUNNING</pre>
+    <script src="app.js?v=20261004-responsive-fix"></script>
+    <script>
+      const nativeFetch = window.fetch.bind(window);
+      const nativeCreateObjectURL = URL.createObjectURL.bind(URL);
+      URL.createObjectURL = (blob) => {
+        blob.text().then((text) => { window.__downloadedCsv = text; });
+        return nativeCreateObjectURL(blob);
+      };
+      window.fetch = (url, options) => {
+        if (url === "/api/generate-test-cases") {
+          const request = JSON.parse(options.body);
+          window.__geminiReceivedImage = request.images.length === 1;
+          return Promise.resolve(new Response(JSON.stringify({
+            assistantMessage: "Drafted cases from the screenshot and request.",
+            testCases: [{
+              title: "Verify valid sign-in",
+              featureName: "Authentication",
+              preconditions: "A registered account exists",
+              steps: ["Open sign-in", "Enter valid credentials", "Submit"],
+              testData: "Registered user",
+              expectedResult: "The account home page opens",
+              testResult: "Not Run",
+              actualResult: "Not run"
+            }]
+          }), { status: 200, headers: { "Content-Type": "application/json" } }));
+        }
+        return nativeFetch(url, options);
+      };
+
+      const pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+      const runChecks = async () => {
+        const results = [];
+        try {
+          const username = document.querySelector("#username");
+          const password = document.querySelector("#password");
+          const loginButton = document.querySelector("#login-form .login-submit").getBoundingClientRect();
+          const loginForm = document.querySelector("#login-form").getBoundingClientRect();
+          results.push(loginButton.width >= loginForm.width - 1);
+          username.value = "qa";
+          password.value = "demo";
+          document.querySelector("#login-form").dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true }));
+          await pause(5_500);
+          document.querySelector('[data-section="Add New"]').click();
+          results.push(document.querySelector(".sidebar-user strong").textContent === "QA");
+          document.querySelector('[data-section="Bugs"]').click();
+          const bugFilters = [...document.querySelectorAll(".bug-filter-dropdown .custom-select-trigger")];
+          results.push(bugFilters.length === 2 && bugFilters.every((filter) => {
+            const rect = filter.getBoundingClientRect();
+            return rect.left >= 0 && rect.right <= window.innerWidth && filter.scrollWidth <= filter.clientWidth + 1;
+          }));
+          document.querySelector('[data-section="Add New"]').click();
+
+          document.querySelector('[data-new-record-type="case"]').click();
+          document.querySelector('[data-mode="ai"]').click();
+          const chat = document.querySelector("#gemini-chat-form");
+          document.querySelector("#ai-prompt").value = "Create test cases for this sign-in screen.";
+          const imageTransfer = new DataTransfer();
+          imageTransfer.items.add(new File(["image"], "sign-in.png", { type: "image/png" }));
+          const imageInput = document.querySelector("#ai-images");
+          imageInput.files = imageTransfer.files;
+          imageInput.dispatchEvent(new Event("change", { bubbles: true }));
+          chat.dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true }));
+          await pause(300);
+          results.push(window.__geminiReceivedImage);
+          results.push(Boolean(document.querySelector(".ai-spreadsheet")));
+          results.push(Boolean(document.querySelector('[data-download-ai-cases]')));
+          document.querySelector("[data-download-ai-cases]").click();
+          await pause(100);
+          results.push(window.__downloadedCsv.includes("TestCase Name") && window.__downloadedCsv.includes("Verify valid sign-in"));
+
+          document.querySelector('[data-ai-field="title"]').value = "Edited Gemini case";
+          document.querySelector('[data-ai-field="expectedResult"]').value = "Edited expected outcome";
+          document.querySelector('#ai-draft-results form[data-form="ai-cases"]').dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true }));
+          await pause(100);
+          results.push(document.querySelector(".new-record-saved h2").textContent.includes("Edited Gemini case"));
+
+          document.querySelector('[data-section="Add New"]').click();
+          document.querySelector('[data-new-record-type="case"]').click();
+          document.querySelector('[data-mode="import"]').click();
+          const fileInput = document.querySelector('[data-import="test-cases"]');
+          const transfer = new DataTransfer();
+          transfer.items.add(new File([
+            "Feature Name,TestCase Name,Prerequisites,Test Data,Steps,Expected Result\nAuthentication,Imported sign-in case,Registered account,Valid user,Open sign-in; Submit,Home page opens"
+          ], "test-cases.csv", { type: "text/csv" }));
+          fileInput.files = transfer.files;
+          fileInput.dispatchEvent(new Event("change", { bubbles: true }));
+          document.querySelector('form[data-form="import-test-cases"]').dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true }));
+          await pause(100);
+          results.push(Boolean(document.querySelector(".import-preview-table")));
+          results.push(Boolean(document.querySelector("[data-import-ai]")));
+          document.querySelector('[data-import-field="title"]').value = "Edited imported case";
+          document.querySelector('[data-import-field="expectedResult"]').value = "Edited import outcome";
+          document.querySelector("[data-save-import]").click();
+          await pause(100);
+          results.push(document.querySelector(".new-record-saved h2").textContent.includes("Edited imported case"));
+
+          const mobile = window.matchMedia("(max-width: 700px)").matches;
+          if (!mobile) {
+            document.querySelector('[data-profile-toggle="topbar"]').click();
+            const topbarMenu = document.querySelector("#profile-menu-topbar");
+            results.push(getComputedStyle(topbarMenu).display !== "none" && Boolean(topbarMenu.querySelector("[data-sign-out]")));
+            const triggerRect = document.querySelector('[data-profile-toggle="topbar"]').getBoundingClientRect();
+            const menuRect = topbarMenu.getBoundingClientRect();
+            results.push(menuRect.top >= triggerRect.bottom && Math.abs(menuRect.right - triggerRect.right) < 2);
+            results.push(getComputedStyle(document.querySelector(".topbar")).zIndex === "20");
+            const heroRect = document.querySelector(".dashboard-hero").getBoundingClientRect();
+            const overlapX = Math.max(menuRect.left + 8, heroRect.left + 8);
+            const overlapY = Math.max(menuRect.top + 8, heroRect.top + 8);
+            const overlapsHero = overlapX < Math.min(menuRect.right, heroRect.right) && overlapY < Math.min(menuRect.bottom, heroRect.bottom);
+            results.push(overlapsHero && document.elementFromPoint(overlapX, overlapY)?.closest("#profile-menu-topbar") === topbarMenu);
+            document.querySelector('[data-profile-toggle="topbar"]').click();
+          }
+          const profileLocation = mobile ? "topbar" : "sidebar";
+          document.querySelector(`[data-profile-toggle="${profileLocation}"]`).click();
+          const profileMenu = document.querySelector(`#profile-menu-${profileLocation}`);
+          results.push(getComputedStyle(profileMenu).display !== "none" && Boolean(profileMenu.querySelector("[data-sign-out]")));
+          results.push(profileMenu.querySelector('a[href="developer.html"]')?.textContent.includes("Switch to Developer"));
+          profileMenu.querySelector("[data-sign-out]").click();
+          await pause(100);
+          results.push(Boolean(document.querySelector("#login-form")));
+
+          document.querySelector("#test-results").textContent = results.every(Boolean)
+            ? `PASS: ${results.length} browser checks`
+            : `FAIL: ${results.map((passed, index) => `${index + 1}=${passed}`).join(", ")}`;
+        } catch (error) {
+          document.querySelector("#test-results").textContent = `FAIL: ${error.stack || error}`;
+        }
+      };
+      document.addEventListener("DOMContentLoaded", () => setTimeout(runChecks, 0));
+    </script>
+  </body>
+</html>

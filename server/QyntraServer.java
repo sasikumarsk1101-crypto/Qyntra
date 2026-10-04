@@ -177,9 +177,9 @@ public final class QyntraServer {
             return;
         }
 
-        String apiKey = System.getenv("OPENAI_API_KEY");
+        String apiKey = System.getenv("GEMINI_API_KEY");
         if (apiKey == null || apiKey.isBlank()) {
-            sendJson(exchange, 503, Map.of("error", "Set OPENAI_API_KEY in the server environment to enable AI generation."));
+            sendJson(exchange, 503, Map.of("error", "Set GEMINI_API_KEY in the server environment to enable Gemini."));
             return;
         }
 
@@ -197,42 +197,61 @@ public final class QyntraServer {
                 sendJson(exchange, 400, Map.of("error", "Enter a screen description under 8,000 characters."));
                 return;
             }
-            if (images.isEmpty() || images.size() > 5) {
-                sendJson(exchange, 400, Map.of("error", "Upload between one and five screenshots."));
+            if (images.size() > 5) {
+                sendJson(exchange, 400, Map.of("error", "Upload no more than five screenshots."));
                 return;
             }
 
-            List<Object> content = new ArrayList<>();
-            content.add(Map.of(
-                    "type", "text",
-                    "text", "Analyze the product screenshot and description. Generate 3 to 6 QA test cases in the Qyntra project template. Include a concise featureName, preconditions, numbered actionable steps, relevant test data and expected results. Set actualResult to exactly 'Not run' and testResult to exactly 'Not Run' because the test has not been executed. Leave bugDescription, testerComments, developerComments, fixStatusIT1, testResultIT2, fixStatusIT2 and testResultIT3 as empty strings; never invent execution results or developer feedback. Cover a main success flow and relevant invalid or boundary cases. Do not invent behaviors unsupported by the evidence. User description: " + prompt
+            List<Object> contents = new ArrayList<>();
+            List<Object> history = array(input.getOrDefault("history", List.of()));
+            if (history.size() > 12) {
+                sendJson(exchange, 400, Map.of("error", "The Gemini chat is too long. Start a new draft and try again."));
+                return;
+            }
+            for (Object item : history) {
+                Map<String, Object> message = object(item);
+                String role = string(message.get("role"));
+                String text = string(message.get("text")).trim();
+                if ((!role.equals("user") && !role.equals("model")) || text.isBlank() || text.length() > 4_000) {
+                    sendJson(exchange, 400, Map.of("error", "The Gemini chat history is invalid."));
+                    return;
+                }
+                contents.add(Map.of("role", role, "parts", List.of(Map.of("text", text))));
+            }
+
+            List<Object> parts = new ArrayList<>();
+            parts.add(Map.of(
+                    "text", "Act as a careful QA test engineer in a chat. Analyze any provided screenshot and user request, then explain your response briefly in assistantMessage. Return the complete revised set of reviewable testCases in the Qyntra template when test cases are requested or have already been drafted. Include actionable numbered steps, preconditions, test data, and expected results. Set actualResult to exactly 'Not run' and testResult to exactly 'Not Run'. Leave bugDescription, testerComments, developerComments, fixStatusIT1, testResultIT2, fixStatusIT2 and testResultIT3 empty; never invent execution results. Cover success and relevant invalid/boundary flows without inventing unsupported behavior. User request: " + prompt
             ));
             for (Object value : images) {
                 String dataUrl = string(value);
-                if (!dataUrl.matches("^data:image/(png|jpe?g|webp);base64,[A-Za-z0-9+/=]+$")) {
+                java.util.regex.Matcher image = java.util.regex.Pattern
+                        .compile("^data:(image/(?:png|jpe?g|webp));base64,([A-Za-z0-9+/=]+)$")
+                        .matcher(dataUrl);
+                if (!image.matches()) {
                     sendJson(exchange, 400, Map.of("error", "A screenshot is not a supported PNG, JPG, or WEBP image."));
                     return;
                 }
-                content.add(Map.of("type", "image_url", "image_url", Map.of("url", dataUrl, "detail", "high")));
+                parts.add(Map.of("inlineData", Map.of("mimeType", image.group(1), "data", image.group(2))));
             }
+            contents.add(Map.of("role", "user", "parts", parts));
 
-            Map<String, Object> schema = testCaseSchema();
             Map<String, Object> apiRequest = Map.of(
-                    "model", "gpt-4o-mini",
-                    "temperature", 0.2,
-                    "messages", List.of(
-                            Map.of("role", "system", "content", "You are a careful QA test engineer. Return concise test cases in the requested template. Only infer behavior supported by the screenshot or user description."),
-                            Map.of("role", "user", "content", content)
-                    ),
-                    "response_format", Map.of(
-                            "type", "json_schema",
-                            "json_schema", Map.of("name", "qyntra_test_cases", "strict", true, "schema", schema)
+                    "systemInstruction", Map.of("parts", List.of(Map.of("text", "You are Gemini, a careful QA test-engineering assistant. Follow the requested structured response and only infer behavior supported by user input or screenshots."))),
+                    "contents", contents,
+                    "generationConfig", Map.of(
+                            "temperature", 0.2,
+                            "responseMimeType", "application/json",
+                            "responseSchema", geminiResponseSchema()
                     )
             );
 
-            HttpRequest request = HttpRequest.newBuilder(URI.create("https://api.openai.com/v1/chat/completions"))
+            String model = System.getenv().getOrDefault("GEMINI_MODEL", "gemini-2.5-flash");
+            String endpoint = "https://generativelanguage.googleapis.com/v1beta/models/"
+                    + model + ":generateContent?key="
+                    + java.net.URLEncoder.encode(apiKey, StandardCharsets.UTF_8);
+            HttpRequest request = HttpRequest.newBuilder(URI.create(endpoint))
                     .timeout(Duration.ofSeconds(90))
-                    .header("Authorization", "Bearer " + apiKey)
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(Json.stringify(apiRequest)))
                     .build();
@@ -240,33 +259,41 @@ public final class QyntraServer {
             try {
                 response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
             } catch (java.net.http.HttpTimeoutException exception) {
-                sendJson(exchange, 504, Map.of("error", "OpenAI took too long to respond. Please try again."));
+                sendJson(exchange, 504, Map.of("error", "Gemini took too long to respond. Please try again."));
                 return;
             } catch (IOException exception) {
-                System.err.println("OpenAI request failed: " + exception.getClass().getSimpleName());
-                sendJson(exchange, 502, Map.of("error", "Could not connect to OpenAI. Check the server's network connection and try again."));
+                System.err.println("Gemini request failed: " + exception.getClass().getSimpleName());
+                sendJson(exchange, 502, Map.of("error", "Could not connect to Gemini. Check the server's network connection and try again."));
                 return;
             }
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                System.err.println("OpenAI returned HTTP " + response.statusCode());
-                sendJson(exchange, 502, Map.of("error", "OpenAI could not generate cases. Check API key, model access, and billing."));
+                System.err.println("Gemini returned HTTP " + response.statusCode());
+                sendJson(exchange, 502, Map.of("error", "Gemini could not generate a response. Check the API key, model access, and billing."));
                 return;
             }
 
             Map<String, Object> responseBody = object(Json.parse(response.body()));
-            List<Object> choices = array(responseBody.get("choices"));
-            if (choices.isEmpty()) {
-                sendJson(exchange, 502, Map.of("error", "OpenAI returned no test cases. Please try again."));
+            List<Object> candidates = array(responseBody.get("candidates"));
+            if (candidates.isEmpty()) {
+                sendJson(exchange, 502, Map.of("error", "Gemini returned no response. Please try again."));
                 return;
             }
-            Map<String, Object> message = object(object(choices.getFirst()).get("message"));
-            Map<String, Object> generated = object(Json.parse(string(message.get("content"))));
+            Map<String, Object> responseContent = object(object(candidates.getFirst()).get("content"));
+            List<Object> responseParts = array(responseContent.get("parts"));
+            if (responseParts.isEmpty()) {
+                sendJson(exchange, 502, Map.of("error", "Gemini returned no response content. Please try again."));
+                return;
+            }
+            Map<String, Object> generated = object(Json.parse(string(object(responseParts.getFirst()).get("text"))));
             List<Object> testCases = array(generated.get("testCases"));
-            if (testCases.isEmpty() || testCases.size() > 10) {
-                sendJson(exchange, 502, Map.of("error", "OpenAI returned an invalid number of test cases."));
+            if (testCases.size() > 10) {
+                sendJson(exchange, 502, Map.of("error", "Gemini returned too many test cases. Please refine the request."));
                 return;
             }
-            sendJson(exchange, 200, Map.of("testCases", testCases));
+            sendJson(exchange, 200, Map.of(
+                    "assistantMessage", string(generated.get("assistantMessage")),
+                    "testCases", testCases
+            ));
         } catch (IllegalArgumentException exception) {
             sendJson(exchange, 400, Map.of("error", "The request was invalid. Check required fields and try again."));
         } catch (InterruptedException exception) {
@@ -275,37 +302,33 @@ public final class QyntraServer {
         }
     }
 
-    private static Map<String, Object> testCaseSchema() {
+    private static Map<String, Object> geminiResponseSchema() {
         Map<String, Object> properties = Map.ofEntries(
-                Map.entry("title", Map.of("type", "string")),
-                Map.entry("featureName", Map.of("type", "string")),
-                Map.entry("preconditions", Map.of("type", "string")),
-                Map.entry("steps", Map.of("type", "array", "items", Map.of("type", "string"))),
-                Map.entry("testData", Map.of("type", "string")),
-                Map.entry("expectedResult", Map.of("type", "string")),
-                Map.entry("bugDescription", Map.of("type", "string")),
-                Map.entry("testerComments", Map.of("type", "string")),
-                Map.entry("testResult", Map.of("type", "string")),
-                Map.entry("developerComments", Map.of("type", "string")),
-                Map.entry("fixStatusIT1", Map.of("type", "string")),
-                Map.entry("testResultIT2", Map.of("type", "string")),
-                Map.entry("fixStatusIT2", Map.of("type", "string")),
-                Map.entry("testResultIT3", Map.of("type", "string")),
-                Map.entry("actualResult", Map.of("type", "string"))
+                Map.entry("title", Map.of("type", "STRING")),
+                Map.entry("featureName", Map.of("type", "STRING")),
+                Map.entry("preconditions", Map.of("type", "STRING")),
+                Map.entry("steps", Map.of("type", "ARRAY", "items", Map.of("type", "STRING"))),
+                Map.entry("testData", Map.of("type", "STRING")),
+                Map.entry("expectedResult", Map.of("type", "STRING")),
+                Map.entry("bugDescription", Map.of("type", "STRING")),
+                Map.entry("testerComments", Map.of("type", "STRING")),
+                Map.entry("testResult", Map.of("type", "STRING")),
+                Map.entry("developerComments", Map.of("type", "STRING")),
+                Map.entry("fixStatusIT1", Map.of("type", "STRING")),
+                Map.entry("testResultIT2", Map.of("type", "STRING")),
+                Map.entry("fixStatusIT2", Map.of("type", "STRING")),
+                Map.entry("testResultIT3", Map.of("type", "STRING")),
+                Map.entry("actualResult", Map.of("type", "STRING"))
         );
+        List<String> caseFields = List.of("title", "featureName", "preconditions", "steps", "testData", "expectedResult", "bugDescription", "testerComments", "testResult", "developerComments", "fixStatusIT1", "testResultIT2", "fixStatusIT2", "testResultIT3", "actualResult");
+        Map<String, Object> testCaseSchema = Map.of("type", "OBJECT", "properties", properties, "required", caseFields);
         return Map.of(
-                "type", "object",
-                "properties", Map.of("testCases", Map.of(
-                        "type", "array",
-                        "items", Map.of(
-                                "type", "object",
-                                "properties", properties,
-                                "required", List.of("title", "featureName", "preconditions", "steps", "testData", "expectedResult", "bugDescription", "testerComments", "testResult", "developerComments", "fixStatusIT1", "testResultIT2", "fixStatusIT2", "testResultIT3", "actualResult"),
-                                "additionalProperties", false
-                        )
-                )),
-                "required", List.of("testCases"),
-                "additionalProperties", false
+                "type", "OBJECT",
+                "properties", Map.of(
+                        "assistantMessage", Map.of("type", "STRING"),
+                        "testCases", Map.of("type", "ARRAY", "items", testCaseSchema)
+                ),
+                "required", List.of("assistantMessage", "testCases")
         );
     }
 

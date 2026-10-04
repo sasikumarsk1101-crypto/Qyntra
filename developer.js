@@ -92,7 +92,8 @@ function renderBug(bug) {
     }
     return "";
   }).join("");
-  const fixStatus = FIX_STATUSES.includes(bug.fixStatus) ? bug.fixStatus : "Not started";
+  const savedFixStatus = bug.fixStatus === "Needs retest" ? "Needs QA retest" : bug.fixStatus;
+  const fixStatus = FIX_STATUSES.includes(savedFixStatus) ? savedFixStatus : "Not started";
   const status = ["Open", "In Progress", "Fixed"].includes(bug.status) ? bug.status : "Open";
   return `
     <article class="developer-bug-card">
@@ -108,6 +109,9 @@ function renderBug(bug) {
         <p class="developer-detail"><strong>Steps to reproduce</strong>${escapeHtml(bug.stepsToReproduce || "Not provided")}</p>
         <p class="developer-detail"><strong>Expected result</strong>${escapeHtml(bug.expectedResult || "Not provided")}</p>
         <p class="developer-detail"><strong>Actual result</strong>${escapeHtml(bug.actualResult || "Not provided")}</p>
+        <p class="developer-detail"><strong>Priority</strong>${escapeHtml(bug.severity || "Medium")}</p>
+        <p class="developer-detail"><strong>Reported by</strong>${escapeHtml(bug.reportedBy || "QA Test Engineer")}</p>
+        <p class="developer-detail"><strong>Tester comments</strong>${escapeHtml(bug.testerComments || "Not provided")}</p>
         ${attachments ? `<div class="developer-detail"><strong>Attachments</strong><div class="developer-attachments">${attachments}</div></div>` : ""}
       </div>
       <form class="developer-update-form" data-bug-id="${escapeHtml(bug.id)}">

@@ -3,6 +3,7 @@ const STORAGE_KEY = "qyntra-workspace-v1";
 const MAX_IMAGE_BYTES = 900_000;
 const MAX_DOCUMENT_BYTES = 500_000;
 const MAX_DOCUMENT_FILES = 3;
+const imagePreviewUrls = new WeakMap();
 
 const initialData = {
   projects: [
@@ -63,8 +64,16 @@ function loadWorkspaceData() {
   }
   for (const bug of parsed.bugs) {
     if (bug.assignee === "QA Engineer") bug.assignee = "QA Test Engineer";
+    if (bug.fixStatus === "Needs retest") bug.fixStatus = "Needs QA retest";
+    bug.assignee = capitalizeQa(bug.assignee || "");
+    bug.reportedBy = capitalizeQa(bug.reportedBy || "");
     bug.developerComments ||= "";
     bug.fixStatus ||= "Not started";
+    bug.testerComments ||= "";
+    bug.reportedBy ||= "QA Test Engineer";
+    bug.status ||= "Open";
+    bug.severity ||= "Medium";
+    bug.attachments ||= [];
   }
   return parsed;
 }
@@ -76,15 +85,47 @@ const state = {
   bugMode: "create",
   aiAttachments: [],
   aiDrafts: [],
+  aiChatMessages: [],
+  aiChatHistory: [],
+  aiPromptDraft: "",
+  pendingImport: null,
   loadingTimer: null,
   activeProjectId: "",
+  bugSearch: "",
+  bugStatusFilter: "All statuses",
+  bugSeverityFilter: "All severities",
+  bugSavedId: "",
+  bugSavedCount: 0,
+  viewBugId: "",
+  newRecordType: "bug",
+  newRecordSaved: null,
+  viewCaseId: "",
+  profileMenuOpen: false,
+  profileMenuLocation: "",
   modal: "",
   editingTestCaseId: "",
   workspace: loadWorkspaceData(),
 };
 
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && state.profileMenuOpen) {
+    state.profileMenuOpen = false;
+    state.profileMenuLocation = "";
+    renderDashboard();
+    document.querySelector('[data-profile-toggle="topbar"]')?.focus();
+  }
+});
+
+document.addEventListener("click", (event) => {
+  if (!state.profileMenuOpen || !(event.target instanceof Element)) return;
+  if (event.target.closest(".sidebar-account, .topbar-profile-control, input, textarea, select, label")) return;
+  state.profileMenuOpen = false;
+  state.profileMenuLocation = "";
+  renderDashboard();
+});
+
 state.activeProjectId = state.workspace.projects[0].id;
-const navItems = ["Overview", "Test Cases", "Bugs", "Assigned Bugs", "Test Plans", "Notes", "Projects"];
+const navItems = ["Overview", "Add New", "Test Cases", "Bugs", "Assigned Bugs", "Test Plans", "Notes", "Projects"];
 
 function projectItems(collection) {
   return state.workspace[collection].filter((item) => item.projectId === state.activeProjectId);
@@ -100,6 +141,10 @@ function projectOptions() {
 
 function saveWorkspace() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state.workspace));
+}
+
+function capitalizeQa(value = "") {
+  return String(value).replace(/\bqa\b/gi, "QA");
 }
 
 function escapeHtml(value = "") {
@@ -119,6 +164,10 @@ function icon(name) {
 
 function brand() {
   return `<a class="brand" href="#" aria-label="Qyntra home"><span class="brand-mark">Q</span><span>Qyntra</span></a>`;
+}
+
+function renderProfileMenu(location) {
+  return `<div class="profile-menu profile-menu-${location}" id="profile-menu-${location}" aria-label="Profile menu"><div class="profile-menu-heading"><div class="avatar">${escapeHtml(initials(state.username))}</div><div><strong>${escapeHtml(capitalizeQa(state.username))}</strong><span>QA Test Engineer</span></div></div><div class="profile-menu-project"><span>Active project</span><strong>${escapeHtml(activeProject().name)}</strong></div><a class="profile-menu-developer" href="developer.html">Switch to Developer <span aria-hidden="true">→</span></a><button class="profile-menu-signout" type="button" data-sign-out>Sign out <span aria-hidden="true">↗</span></button></div>`;
 }
 
 function renderLogin() {
@@ -162,7 +211,7 @@ function renderLogin() {
       document.querySelector("#login-error").textContent = "Enter both your username and password to continue.";
       return;
     }
-    state.username = username;
+    state.username = capitalizeQa(username);
     state.modal = "";
     if (!localStorage.getItem(STORAGE_KEY)) saveWorkspace();
     renderRunner();
@@ -203,6 +252,11 @@ function counts() {
 }
 
 function renderDashboard() {
+  document.querySelectorAll(".custom-select-menu[data-portaled]").forEach((menu) => menu.remove());
+  document.querySelectorAll("[data-previews]").forEach((container) => {
+    for (const url of imagePreviewUrls.get(container) || []) URL.revokeObjectURL(url);
+    imagePreviewUrls.delete(container);
+  });
   const totals = counts();
   app.innerHTML = `
     <section class="dashboard">
@@ -218,15 +272,17 @@ function renderDashboard() {
               </button>`).join("")}
           </nav>
           <div class="sidebar-tip"><span>✦</span><strong>Small steps, better releases.</strong><p>Every test helps your team ship with confidence.</p></div>
-          <div class="sidebar-bottom">
-            <div class="sidebar-user"><div class="avatar">${escapeHtml(initials(state.username))}</div><div class="user-copy"><strong>${escapeHtml(state.username)}</strong><span>QA Test Engineer</span></div></div>
-            <button class="signout-button" id="sign-out" type="button">Sign out</button>
+          <div class="sidebar-bottom sidebar-account">
+                <button class="sidebar-user profile-trigger" type="button" data-profile-toggle="sidebar" aria-haspopup="menu" aria-expanded="${state.profileMenuOpen && state.profileMenuLocation === "sidebar"}" aria-controls="profile-menu-sidebar">
+                  <div class="avatar">${escapeHtml(initials(state.username))}</div><span class="user-copy"><strong>${escapeHtml(capitalizeQa(state.username))}</strong><span>QA Test Engineer</span></span><span class="profile-chevron" aria-hidden="true">⌄</span>
+                </button>
+                ${state.profileMenuOpen && state.profileMenuLocation === "sidebar" ? renderProfileMenu("sidebar") : ""}
           </div>
         </aside>
         <div class="dashboard-main">
           <header class="topbar">
             <div class="breadcrumbs">${brand()} <span>/</span> <strong>${escapeHtml(state.section)}</strong></div>
-            <div class="topbar-right"><select class="topbar-project-select" aria-label="Filter by project" data-project-select>${projectOptions()}</select><span class="topbar-date">${new Intl.DateTimeFormat("en", { weekday: "long", month: "long", day: "numeric" }).format(new Date())}</span><div class="avatar">${escapeHtml(initials(state.username))}</div></div>
+            <div class="topbar-right"><select class="topbar-project-select" aria-label="Filter by project" data-project-select>${projectOptions()}</select><span class="topbar-date">${new Intl.DateTimeFormat("en", { weekday: "long", month: "long", day: "numeric" }).format(new Date())}</span><div class="topbar-profile-control"><button class="avatar topbar-profile-trigger" type="button" data-profile-toggle="topbar" aria-label="Open profile menu" aria-haspopup="menu" aria-expanded="${state.profileMenuOpen && state.profileMenuLocation === "topbar"}" aria-controls="profile-menu-topbar">${escapeHtml(initials(state.username))}</button>${state.profileMenuOpen && state.profileMenuLocation === "topbar" ? renderProfileMenu("topbar") : ""}</div></div>
           </header>
           <main class="dashboard-content">
             ${state.section === "Overview" ? renderOverview(totals) : renderSection(state.section)}
@@ -240,18 +296,42 @@ function renderDashboard() {
   document.querySelectorAll("[data-section]").forEach((button) => {
     button.addEventListener("click", () => {
       state.section = button.dataset.section;
+      state.profileMenuOpen = false;
+      state.profileMenuLocation = "";
+      state.modal = "";
+      if (state.section === "Add New") {
+        state.bugSavedId = "";
+        state.bugSavedCount = 0;
+        state.newRecordSaved = null;
+      }
       renderDashboard();
     });
   });
-  document.querySelector("#sign-out").addEventListener("click", () => {
-    window.clearTimeout(state.loadingTimer);
-    state.username = "";
-    state.modal = "";
-    renderLogin();
+  document.querySelectorAll("[data-profile-toggle]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const location = button.dataset.profileToggle;
+      const shouldOpen = !state.profileMenuOpen || state.profileMenuLocation !== location;
+      state.profileMenuOpen = shouldOpen;
+      state.profileMenuLocation = shouldOpen ? location : "";
+      renderDashboard();
+      document.querySelector(`[data-profile-toggle="${location}"]`)?.focus();
+    });
+  });
+  document.querySelectorAll("[data-sign-out]").forEach((button) => {
+    button.addEventListener("click", () => {
+      window.clearTimeout(state.loadingTimer);
+      state.username = "";
+      state.profileMenuOpen = false;
+      state.profileMenuLocation = "";
+      state.modal = "";
+      renderLogin();
+    });
   });
   document.querySelectorAll("[data-project-select]").forEach((select) => {
     select.addEventListener("change", (event) => {
       state.activeProjectId = event.currentTarget.value;
+      state.profileMenuOpen = false;
+      state.profileMenuLocation = "";
       renderDashboard();
     });
   });
@@ -265,14 +345,57 @@ function renderDashboard() {
   document.querySelectorAll("[data-action]").forEach((button) => {
     button.addEventListener("click", () => {
       state.section = button.dataset.action;
+      if (button.dataset.addType) {
+        state.newRecordType = button.dataset.addType;
+        state.newRecordSaved = null;
+        state.bugSavedId = "";
+        state.bugSavedCount = 0;
+      }
+      state.modal = "";
       renderDashboard();
     });
   });
   document.querySelectorAll("[data-open-modal]").forEach((button) => {
     button.addEventListener("click", () => {
       state.editingTestCaseId = "";
+      if (button.dataset.openModal === "bug") {
+        state.bugSavedId = "";
+        state.bugSavedCount = 0;
+      }
+      if (button.dataset.openModal === "bug" || button.dataset.openModal === "case") {
+        state.newRecordType = button.dataset.openModal === "case" ? "case" : "bug";
+        state.newRecordSaved = null;
+        state.section = "Add New";
+        state.modal = "";
+        renderDashboard();
+        return;
+      }
       state.modal = button.dataset.openModal;
       renderDashboard();
+    });
+  });
+  document.querySelectorAll("[data-bug-followup]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (button.dataset.bugFollowup === "add") {
+        state.bugSavedId = "";
+        state.bugSavedCount = 0;
+        state.newRecordSaved = null;
+        state.bugMode = "create";
+        state.section = "Add New";
+        state.newRecordType = "bug";
+        state.modal = "";
+      } else {
+        state.section = "Bugs";
+        state.modal = "";
+        state.viewBugId = button.dataset.bugId || state.bugSavedId;
+        state.bugSearch = "";
+        state.bugStatusFilter = "All statuses";
+        state.bugSeverityFilter = "All severities";
+      }
+      renderDashboard();
+      if (button.dataset.bugFollowup === "view") {
+        document.getElementById(`bug-report-${state.viewBugId}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
     });
   });
   document.querySelectorAll("[data-edit-test-case]").forEach((button) => {
@@ -285,24 +408,95 @@ function renderDashboard() {
   document.querySelectorAll("[data-mode]").forEach((button) => {
     button.addEventListener("click", () => {
       if (state.modal === "case" || state.section === "Test Cases") state.testCaseMode = button.dataset.mode;
-      if (state.modal === "bug" || state.section === "Bugs") state.bugMode = button.dataset.mode;
+      if (state.modal === "bug" || state.section === "Bugs" || (state.section === "Add New" && state.newRecordType === "bug")) state.bugMode = button.dataset.mode;
+      if (state.section === "Add New" && state.newRecordType === "case") state.testCaseMode = button.dataset.mode;
+      if (state.modal === "bug") {
+        state.bugSavedId = "";
+        state.bugSavedCount = 0;
+      }
       renderDashboard();
+    });
+  });
+  document.querySelectorAll("[data-new-record-type]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.newRecordType = button.dataset.newRecordType;
+      state.newRecordSaved = null;
+      state.bugSavedId = "";
+      state.bugSavedCount = 0;
+      renderDashboard();
+    });
+  });
+  document.querySelectorAll("[data-new-record-followup]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (button.dataset.newRecordFollowup === "view") {
+        if (state.newRecordSaved?.type === "case") state.viewCaseId = state.newRecordSaved.id;
+        state.section = state.newRecordSaved?.type === "case" ? "Test Cases" : "Bugs";
+      } else {
+        state.newRecordSaved = null;
+      }
+      renderDashboard();
+      if (button.dataset.newRecordFollowup === "view" && state.viewCaseId) {
+        document.getElementById(`test-case-report-${state.viewCaseId}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
     });
   });
   document.querySelectorAll("form[data-form]").forEach((form) => {
     form.addEventListener("submit", handleFormSubmit);
   });
-  document.querySelectorAll("[data-bug-status]").forEach((select) => {
-    select.addEventListener("change", () => updateBugStatus(select.dataset.bugStatus, select.value));
+  const geminiForm = document.querySelector("#gemini-chat-form");
+  if (geminiForm) geminiForm.addEventListener("submit", sendGeminiMessage);
+  document.querySelectorAll("[data-download-ai-cases]").forEach((button) => {
+    button.addEventListener("click", downloadAiCases);
   });
+  document.querySelectorAll("[data-save-import]").forEach((button) => {
+    button.addEventListener("click", saveImportedTestCases);
+  });
+  document.querySelectorAll("[data-cancel-import]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.pendingImport = null;
+      renderDashboard();
+    });
+  });
+  document.querySelectorAll("[data-import-ai]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const records = state.pendingImport?.records || [];
+      state.aiPromptDraft = `Review these imported test cases and improve the coverage and wording. Return the complete revised test case set in the Qyntra spreadsheet format:\n${JSON.stringify(records.map((record) => ({
+        featureName: record.featureName,
+        title: record.title,
+        preconditions: record.preconditions,
+        testData: record.testData,
+        steps: record.steps,
+        expectedResult: record.expectedResult,
+      })))}`;
+      state.aiChatMessages = [];
+      state.aiChatHistory = [];
+      state.aiDrafts = [];
+      state.pendingImport = null;
+      state.testCaseMode = "ai";
+      renderDashboard();
+      document.querySelector("#ai-prompt")?.focus();
+    });
+  });
+  document.querySelectorAll("[data-clear-ai-chat]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.aiChatMessages = [];
+      state.aiChatHistory = [];
+      state.aiDrafts = [];
+      state.aiAttachments = [];
+      state.aiPromptDraft = "";
+      renderDashboard();
+    });
+  });
+  setupCustomDropdowns();
+  const bugSearch = document.querySelector("[data-bug-search]");
+  if (bugSearch) bugSearch.addEventListener("input", applyBugFilters);
+  if (bugSearch) applyBugFilters();
   document.querySelectorAll("[data-image-input]").forEach((input) => {
     input.addEventListener("change", () => showImagePreviews(input));
   });
   document.querySelectorAll("[data-document-input]").forEach((input) => {
     input.addEventListener("change", () => showDocumentPreviews(input));
   });
-  const aiButton = document.querySelector("#generate-ai-cases");
-  if (aiButton) aiButton.addEventListener("click", generateAiDrafts);
   const entryDialog = document.querySelector("#entry-dialog");
   if (entryDialog) {
     entryDialog.addEventListener("cancel", (event) => {
@@ -331,7 +525,7 @@ function renderOverview(totals) {
       <div><span class="hero-kicker">QA TEST ENGINEER · ${escapeHtml(project.name).toUpperCase()}</span><h1>Welcome to Qyntra, ${escapeHtml(state.username)} <span class="wave">✦</span></h1><p>${escapeHtml(project.description || "Your project quality snapshot is ready.")}</p></div>
       <div class="hero-art" aria-hidden="true"><span class="orbit orbit-one"></span><span class="orbit orbit-two"></span><span class="hero-check">✓</span></div>
     </section>
-    <div class="overview-toolbar"><div><h2>Project overview</h2><p>Keep an eye on the work that moves quality forward.</p></div><button class="primary-button" data-open-modal="case" type="button">+ Add test case</button></div>
+    <div class="overview-toolbar"><div><h2>Project overview</h2><p>Keep an eye on the work that moves quality forward.</p></div><button class="primary-button" data-action="Add New" data-add-type="case" type="button">+ Add New</button></div>
     <section class="stat-grid" aria-label="Workspace totals">
       ${statCard("Total test cases", totals.testCases, "▤", "In your test library", "violet")}
       ${statCard("Total bugs", totals.bugs, "🐞", "All reported issues", "coral")}
@@ -360,7 +554,8 @@ function statCard(label, value, symbol, note, tone) {
 }
 
 function quickAction(section, symbol, title, detail, tone) {
-  return `<button class="quick-action ${tone}" data-open-modal="${section}" type="button"><span class="quick-icon">${symbol}</span><span class="quick-copy"><strong>${title}</strong><small>${detail}</small></span><span class="quick-arrow">→</span></button>`;
+  const route = section === "case" || section === "bug";
+  return `<button class="quick-action ${tone}" ${route ? `data-action="Add New" data-add-type="${section}"` : `data-open-modal="${section}"`} type="button"><span class="quick-icon">${symbol}</span><span class="quick-copy"><strong>${title}</strong><small>${detail}</small></span><span class="quick-arrow">→</span></button>`;
 }
 
 function recentBugsCard() {
@@ -399,10 +594,11 @@ function documentLinks(documents = []) {
 }
 
 function bugRow(bug, editable) {
+  const searchText = [bug.id, bug.title, bug.module, bug.assignee, bug.description].join(" ").toLowerCase();
   return `
-    <article class="bug-row">
+    <article class="bug-row" data-bug-entry data-search="${escapeHtml(searchText)}" data-status="${escapeHtml(bug.status)}" data-severity="${escapeHtml(bug.severity)}">
       <span class="bug-symbol" aria-hidden="true">🐞</span>
-      <div class="bug-copy"><strong>${escapeHtml(bug.title)}</strong><span>${escapeHtml(bug.id)} · ${escapeHtml(bug.module)} · ${escapeHtml(bug.assignee)} ${attachmentStrip(bug.attachments)}</span><details class="record-details"><summary>View report</summary><p><b>Description:</b> ${escapeHtml(bug.description || "Not provided")}</p><p><b>Steps:</b> ${escapeHtml(bug.stepsToReproduce || "Not provided")}</p><p><b>Expected:</b> ${escapeHtml(bug.expectedResult || "Not provided")}</p><p><b>Actual:</b> ${escapeHtml(bug.actualResult || "Not provided")}</p><p><b>Developer fix status:</b> ${escapeHtml(bug.fixStatus || "Not started")}</p><p><b>Developer comments:</b> ${escapeHtml(bug.developerComments || "Not provided")}</p></details></div>
+      <div class="bug-copy"><strong>${escapeHtml(bug.title)}</strong><span>${escapeHtml(bug.id)} · ${escapeHtml(bug.module)} · ${escapeHtml(bug.assignee)} ${attachmentStrip(bug.attachments)}</span><details class="record-details" id="bug-report-${escapeHtml(bug.id)}" ${state.viewBugId === bug.id ? "open" : ""}><summary>View report</summary><p><b>Description:</b> ${escapeHtml(bug.description || "Not provided")}</p><p><b>Steps:</b> ${escapeHtml(bug.stepsToReproduce || "Not provided")}</p><p><b>Expected:</b> ${escapeHtml(bug.expectedResult || "Not provided")}</p><p><b>Actual:</b> ${escapeHtml(bug.actualResult || "Not provided")}</p><p><b>Severity:</b> ${escapeHtml(bug.severity || "Medium")}</p><p><b>QA status:</b> ${escapeHtml(bug.status || "Open")}</p><p><b>Reported by:</b> ${escapeHtml(bug.reportedBy || "QA Test Engineer")}</p><p><b>Tester comments:</b> ${escapeHtml(bug.testerComments || "Not provided")}</p><p><b>Developer fix status:</b> ${escapeHtml(bug.fixStatus || "Not started")}</p><p><b>Developer comments:</b> ${escapeHtml(bug.developerComments || "Not provided")}</p></details></div>
       <div class="bug-trailing"><span class="severity ${bug.severity.toLowerCase()}">${escapeHtml(bug.severity)}</span>${editable ? `<select class="inline-status" data-bug-status="${escapeHtml(bug.id)}" aria-label="Update ${escapeHtml(bug.id)} status">${["Open", "In Progress", "Fixed"].map((status) => `<option ${bug.status === status ? "selected" : ""}>${status}</option>`).join("")}</select>` : `<span class="bug-status ${statusClass(bug.status)}">${escapeHtml(bug.status)}</span>`}</div>
     </article>
   `;
@@ -411,31 +607,36 @@ function bugRow(bug, editable) {
 function testCasesCard(compact = false) {
   const allCases = projectItems("testCases");
   const cases = compact ? allCases.slice(0, 4) : allCases;
+  const caseRows = cases.map((testCase) => {
+    const testResult = testCase.testResult || testCase.status || "Not Run";
+    const steps = Array.isArray(testCase.steps) ? testCase.steps.join("\n") : testCase.steps || "";
+    const detailFields = [
+      ["Test Case No", testCase.id],
+      ["Feature Name", testCase.featureName || testCase.module],
+      ["TestCase Name", testCase.title],
+      ["Prerequisites", testCase.preconditions],
+      ["Test Data", testCase.testData],
+      ["Steps", steps],
+      ["Expected Result", testCase.expectedResult],
+      ["Bug Description", testCase.bugDescription],
+      ["Tester Comments", testCase.testerComments],
+      ["Test Result", testResult],
+      ["Developer Comments", testCase.developerComments],
+      ["Fix status IT1", testCase.fixStatusIT1],
+      ["Test Result IT2", testCase.testResultIT2],
+      ["Fix status IT2", testCase.fixStatusIT2],
+      ["Test Result IT3", testCase.testResultIT3],
+    ];
+    const details = `<details class="record-details test-case-details" id="test-case-report-${escapeHtml(testCase.id)}" ${state.viewCaseId === testCase.id ? "open" : ""}><summary>View full test case &amp; documents</summary><div class="test-case-detail-grid">${detailFields.map(([label, value]) => `<div class="test-case-detail-item"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || "—")}</strong></div>`).join("")}</div><section class="report-documents"><h3>Uploaded report documents</h3>${documentLinks(testCase.documents || [])}</section><button class="secondary-button edit-report-button" type="button" data-edit-test-case="${escapeHtml(testCase.id)}">Edit this test report</button></details>`;
+    if (compact) {
+      return `<article class="data-row"><div class="data-icon case-icon">TC</div><div class="data-copy"><strong>${escapeHtml(testCase.title)}</strong><span>${escapeHtml(testCase.id)} · ${escapeHtml(testCase.featureName || testCase.module)} · ${escapeHtml(testCase.priority)} priority ${attachmentStrip(testCase.attachments)}</span>${details}</div><span class="status-pill ${statusClass(testResult)}">${escapeHtml(testResult)}</span></article>`;
+    }
+    return `<tr><td><span class="record-table-id">${escapeHtml(testCase.id)}</span></td><td>${escapeHtml(testCase.featureName || testCase.module || "—")}</td><td><div class="record-table-title"><strong>${escapeHtml(testCase.title)}</strong>${attachmentStrip(testCase.attachments)}${details}</div></td><td><span class="severity ${escapeHtml(testCase.priority.toLowerCase())}">${escapeHtml(testCase.priority)}</span></td><td><span class="status-pill ${statusClass(testResult)}">${escapeHtml(testResult)}</span></td></tr>`;
+  }).join("");
   return `
     <section class="content-card">
       <div class="card-heading"><div><h2>Test cases</h2><p>${allCases.length} scenarios in ${escapeHtml(activeProject().name)}</p></div>${compact ? `<button class="card-link" data-action="Test Cases" type="button">View all →</button>` : ""}</div>
-      ${cases.length ? `<div class="data-list">${cases.map((testCase) => {
-        const testResult = testCase.testResult || testCase.status || "Not Run";
-        const steps = Array.isArray(testCase.steps) ? testCase.steps.join("\n") : testCase.steps || "";
-        const detailFields = [
-          ["Test Case No", testCase.id],
-          ["Feature Name", testCase.featureName || testCase.module],
-          ["TestCase Name", testCase.title],
-          ["Prerequisites", testCase.preconditions],
-          ["Test Data", testCase.testData],
-          ["Steps", steps],
-          ["Expected Result", testCase.expectedResult],
-          ["Bug Description", testCase.bugDescription],
-          ["Tester Comments", testCase.testerComments],
-          ["Test Result", testResult],
-          ["Developer Comments", testCase.developerComments],
-          ["Fix status IT1", testCase.fixStatusIT1],
-          ["Test Result IT2", testCase.testResultIT2],
-          ["Fix status IT2", testCase.fixStatusIT2],
-          ["Test Result IT3", testCase.testResultIT3],
-        ];
-        return `<article class="data-row"><div class="data-icon case-icon">TC</div><div class="data-copy"><strong>${escapeHtml(testCase.title)}</strong><span>${escapeHtml(testCase.id)} · ${escapeHtml(testCase.featureName || testCase.module)} · ${escapeHtml(testCase.priority)} priority ${attachmentStrip(testCase.attachments)}</span><details class="record-details test-case-details"><summary>View full test case &amp; documents</summary><div class="test-case-detail-grid">${detailFields.map(([label, value]) => `<div class="test-case-detail-item"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || "—")}</strong></div>`).join("")}</div><section class="report-documents"><h3>Uploaded report documents</h3>${documentLinks(testCase.documents || [])}</section><button class="secondary-button edit-report-button" type="button" data-edit-test-case="${escapeHtml(testCase.id)}">Edit this test report</button></details></div><span class="status-pill ${statusClass(testResult)}">${escapeHtml(testResult)}</span></article>`;
-      }).join("")}</div>` : emptyState("Add your first test case to start building coverage.")}
+      ${cases.length ? compact ? `<div class="data-list">${caseRows}</div>` : `<div class="bug-table-wrap"><table class="workspace-table"><thead><tr><th scope="col">Case ID</th><th scope="col">Feature</th><th scope="col">Test case</th><th scope="col">Priority</th><th scope="col">Result</th></tr></thead><tbody>${caseRows}</tbody></table></div>` : emptyState("Add your first test case to start building coverage.")}
     </section>
   `;
 }
@@ -443,21 +644,26 @@ function testCasesCard(compact = false) {
 function testPlansCard(compact = false) {
   const allPlans = projectItems("testPlans");
   const plans = compact ? allPlans.slice(0, 3) : allPlans;
+  const planRows = plans.map((plan) => compact
+    ? `<div class="data-row"><div class="data-icon plan-icon">◷</div><div class="data-copy"><strong>${escapeHtml(plan.title)}</strong><span>${escapeHtml(plan.id)} · ${escapeHtml(plan.scope)}</span></div><span class="date-tag">${escapeHtml(plan.date)}</span></div>`
+    : `<tr><td><span class="record-table-id">${escapeHtml(plan.id)}</span></td><td><strong>${escapeHtml(plan.title)}</strong></td><td>${escapeHtml(plan.scope || "—")}</td><td><span class="date-tag">${escapeHtml(plan.date || "—")}</span></td></tr>`
+  ).join("");
   return `
     <section class="content-card">
       <div class="card-heading"><div><h2>Test plans</h2><p>${allPlans.length} plans in ${escapeHtml(activeProject().name)}</p></div>${compact ? `<button class="card-link" data-action="Test Plans" type="button">View all →</button>` : ""}</div>
-      ${plans.length ? `<div class="data-list">${plans.map((plan) => `<div class="data-row"><div class="data-icon plan-icon">◷</div><div class="data-copy"><strong>${escapeHtml(plan.title)}</strong><span>${escapeHtml(plan.id)} · ${escapeHtml(plan.scope)}</span></div><span class="date-tag">${escapeHtml(plan.date)}</span></div>`).join("")}</div>` : emptyState("No test plans yet.")}
+      ${plans.length ? compact ? `<div class="data-list">${planRows}</div>` : `<div class="bug-table-wrap"><table class="workspace-table"><thead><tr><th scope="col">Plan ID</th><th scope="col">Plan name</th><th scope="col">Scope</th><th scope="col">Target date</th></tr></thead><tbody>${planRows}</tbody></table></div>` : emptyState("No test plans yet.")}
     </section>
   `;
 }
 
 function projectCards() {
-  return `<div class="project-card-grid">${state.workspace.projects.map((project) => {
+  const rows = state.workspace.projects.map((project) => {
     const selected = project.id === state.activeProjectId;
     const testCount = state.workspace.testCases.filter((item) => item.projectId === project.id).length;
     const bugCount = state.workspace.bugs.filter((item) => item.projectId === project.id).length;
-    return `<article class="project-card ${selected ? "selected" : ""}"><div class="project-card-top"><span class="project-icon ${escapeHtml(project.color || "violet")}">Q</span>${selected ? '<span class="project-active">ACTIVE</span>' : ""}</div><h2>${escapeHtml(project.name)}</h2><p>${escapeHtml(project.description || "Project quality workspace")}</p><div class="project-totals"><span><b>${testCount}</b> test cases</span><span><b>${bugCount}</b> bugs</span></div><button class="secondary-button" data-open-project="${escapeHtml(project.id)}" type="button">${selected ? "Open project" : "Switch to project"} →</button></article>`;
-  }).join("")}</div>`;
+    return `<tr><td><strong>${escapeHtml(project.name)}</strong>${selected ? ' <span class="project-active">ACTIVE</span>' : ""}</td><td>${escapeHtml(project.description || "Project quality workspace")}</td><td>${testCount}</td><td>${bugCount}</td><td><button class="table-action-button" data-open-project="${escapeHtml(project.id)}" type="button">${selected ? "Open project" : "Switch to project"} →</button></td></tr>`;
+  }).join("");
+  return `<section class="content-card"><div class="card-heading"><div><h2>Projects</h2><p>${state.workspace.projects.length} projects in your workspace</p></div></div><div class="bug-table-wrap"><table class="workspace-table"><thead><tr><th scope="col">Project</th><th scope="col">Description</th><th scope="col">Test cases</th><th scope="col">Bugs</th><th scope="col">Action</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
 }
 
 function projectFormCard() {
@@ -466,8 +672,9 @@ function projectFormCard() {
 
 function renderSection(section) {
   const content = {
+    "Add New": newRecordPage(),
     "Test Cases": `${sectionHeader("Test Cases", "Build and maintain clear, repeatable test scenarios.", "Add test case")}<div class="section-grid"><div>${testCasesCard()}</div></div>`,
-    "Bugs": `${sectionHeader("Bug Tracker", "Log issues clearly so they can be reproduced and fixed.", "Add bug")}<div class="section-grid"><div>${bugListCard(projectItems("bugs"), true)}</div></div>`,
+    "Bugs": `${sectionHeader("Bug Tracker", "Log issues clearly so they can be reproduced and fixed.", "Add bug")}${bugTrackerContent(projectItems("bugs"))}`,
     "Assigned Bugs": `${sectionHeader("Assigned Bugs", "Issues assigned for developer follow-up in this project.", "Report a bug")}<div class="section-grid"><div>${bugListCard(projectItems("bugs").filter((bug) => bug.assignee === "Developer"), true, "No issues assigned to developers in this project.")}</div></div>`,
     "Test Plans": `${sectionHeader("Test Plans", "Plan coverage and keep your upcoming test cycles organized.", "Create test plan")}<div class="section-grid"><div>${testPlansCard()}</div></div>`,
     Notes: `${sectionHeader("Team Notes", "Keep important testing context in one shared place.", "Add a note")}<div class="section-grid"><div>${notesCard()}</div></div>`,
@@ -544,33 +751,52 @@ function singleCaseCard(testCase = null) {
 
 function aiPromptCard() {
   return `
-    <div class="ai-panel">
-      <span class="ai-badge">✦ AI-ASSISTED TEST DESIGN</span>
-      <p>Upload a screen and describe the workflow. Qyntra sends both to the configured OpenAI backend and drafts reviewable test scenarios.</p>
-      <label class="upload-zone"><span class="upload-symbol">▧</span><strong>Choose screenshots</strong><small>PNG, JPG or WEBP · up to 900 KB each</small><input id="ai-images" type="file" accept="image/*" multiple data-image-input /></label>
-      <div class="image-previews" data-previews></div>
-      <label class="prompt-label">What should this screen do?<textarea id="ai-prompt" rows="4" placeholder="Example: A login screen should accept a valid email and password, show an error for incorrect credentials, and offer a forgot-password link."></textarea></label>
-      <div class="ai-disclosure">Screenshots are sent to your configured Qyntra backend for OpenAI vision analysis. They are saved with cases only after you approve the drafts.</div>
-      <button class="primary-button" id="generate-ai-cases" type="button">✦ Draft test cases</button>
-      <p class="form-message ai-result" aria-live="polite"></p>
-    </div>
+    <section class="content-card ai-panel">
+      <span class="ai-badge">✦ GEMINI QA CHAT</span>
+      <p>Chat with Gemini, attach a screen image, and ask for test cases or refinements. Your screenshots are analyzed by the configured Gemini model.</p>
+      <div class="ai-chat-messages" id="ai-chat-messages" aria-live="polite">${renderAiMessages()}</div>
+      <form id="gemini-chat-form" class="gemini-chat-form">
+        <label class="prompt-label" for="ai-prompt">Message Gemini<textarea id="ai-prompt" rows="3" placeholder="Upload a screen and ask: Create positive, negative and boundary test cases for this flow." required>${escapeHtml(state.aiPromptDraft)}</textarea></label>
+        <label class="upload-zone"><span class="upload-symbol">▧</span><strong>Attach screenshots (optional)</strong><small>PNG, JPG or WEBP · up to 5 images, 900 KB each</small><input id="ai-images" type="file" accept="image/png,image/jpeg,image/webp" multiple data-image-input /></label>
+        <div class="image-previews" data-previews></div>
+        <div class="ai-disclosure">Review and edit every generated case before saving. Gemini chats and images are not stored with your workspace.</div>
+        <button class="primary-button" id="generate-ai-cases" type="submit">✦ Send to Gemini</button>
+        <p class="form-message ai-result" aria-live="polite"></p>
+      </form>
+    </section>
   `;
 }
 
 function aiDraftCard() {
-  return `<section class="content-card ai-results-card"><div class="card-heading"><div><h2>AI draft workspace</h2><p>Review each case before saving it to the shared library.</p></div></div><div id="ai-draft-results"></div></section>`;
+  return `<section class="content-card ai-results-card"><div class="card-heading"><div><h2>Editable test case spreadsheet</h2><p>Review the generated rows, edit cells, download an Excel-compatible CSV, or add them to the test library.</p></div><button class="secondary-button" type="button" data-clear-ai-chat>New chat</button></div><div id="ai-draft-results">${renderAiDraftTable()}</div></section>`;
 }
 
 function bugTools() {
+  if (state.bugSavedId) {
+    const bug = state.workspace.bugs.find((item) => item.id === state.bugSavedId);
+    if (!bug) throw new Error(`Saved bug ${state.bugSavedId} was not found.`);
+    return `
+      <section class="content-card bug-saved-card" role="status">
+        <span class="bug-saved-icon" aria-hidden="true">✓</span>
+        <p class="section-kicker">BUG REPORT SAVED</p>
+        <h2>${escapeHtml(bug.id)} · ${escapeHtml(bug.title)}</h2>
+        <p>${state.bugSavedCount > 1 ? `${state.bugSavedCount} bug reports have` : "Your report has"} been saved to ${escapeHtml(activeProject().name)} with reproduction details and attachments.</p>
+        <div class="bug-saved-actions">
+          <button class="primary-button" type="button" data-bug-followup="add">+ Add another bug</button>
+          <button class="secondary-button" type="button" data-bug-followup="view" data-bug-id="${escapeHtml(bug.id)}">View saved report</button>
+        </div>
+      </section>
+    `;
+  }
   return `
     <section class="content-card tools-card">
-      <div class="card-heading"><div><h2>Report bugs</h2><p>Each issue is saved to ${escapeHtml(activeProject().name)}.</p></div></div>
+      <div class="card-heading"><div><h2>Report Bugs</h2><p>Each issue is saved to ${escapeHtml(activeProject().name)}.</p></div></div>
       <div class="tool-tabs">
         <button class="tool-tab ${state.bugMode === "create" ? "selected" : ""}" data-mode="create" type="button">Bug template</button>
         <button class="tool-tab ${state.bugMode === "bulk" ? "selected" : ""}" data-mode="bulk" type="button">Bulk add</button>
         <button class="tool-tab ${state.bugMode === "import" ? "selected" : ""}" data-mode="import" type="button">Import</button>
       </div>
-      ${state.bugMode === "bulk" ? bulkBugCard() : state.bugMode === "import" ? importCard("bugs", "Choose a CSV or JSON file. CSV supports title,module,severity,assignee,description,stepsToReproduce,expectedResult,actualResult.") : singleBugCard()}
+      ${state.bugMode === "bulk" ? bulkBugCard() : state.bugMode === "import" ? importCard("bugs", "Import a CSV or JSON table with title,module,severity,status,assignee,description,stepsToReproduce,expectedResult,actualResult,testerComments,fixStatus,reportedBy.") : singleBugCard()}
     </section>
   `;
 }
@@ -579,14 +805,16 @@ function bulkBugCard() {
   return `
     <form data-form="bulk-bugs" class="workspace-form">
       <div class="template-banner bug-template"><span>BUG</span><div><strong>Bulk bug template</strong><small>Each title becomes an assigned issue in this project.</small></div></div>
-      <label>Bug titles <span class="field-hint">One bug per line</span><textarea name="lines" rows="3" placeholder="Checkout button does not respond&#10;Error message is unclear" required></textarea></label>
+      <label>Bug titles <span class="field-hint">One bug per line. Shared details below are applied to each issue.</span><textarea name="lines" rows="3" placeholder="Checkout button does not respond&#10;Error message is unclear" required></textarea></label>
       <label>Module<input name="module" placeholder="e.g. Checkout" required /></label>
       <label>Description<textarea name="description" rows="2" placeholder="What is wrong?" required></textarea></label>
       <label>Steps to reproduce<textarea name="stepsToReproduce" rows="3" placeholder="1. Open checkout&#10;2. Enter a valid address&#10;3. Click Continue" required></textarea></label>
       <label>Expected result<textarea name="expectedResult" rows="2" placeholder="What should happen?" required></textarea></label>
       <label>Actual result<textarea name="actualResult" rows="2" placeholder="What actually happened?" required></textarea></label>
-      <div class="form-row"><label>Severity<select name="severity"><option>High</option><option selected>Medium</option><option>Low</option></select></label><label>Assign to<select name="assignee"><option>Developer</option><option>QA Test Engineer</option></select></label></div>
-      <label>Attach screenshots (optional)<input type="file" name="images" accept="image/*" multiple data-image-input /></label>
+      <div class="form-row"><label>Priority<select name="severity"><option>Critical</option><option>High</option><option selected>Medium</option><option>Low</option></select></label><label>Assign to<select name="assignee"><option>Developer</option><option>QA Test Engineer</option></select></label></div>
+      <div class="form-row"><label>QA status<select name="status"><option selected>Open</option><option>In Progress</option><option>Fixed</option></select></label><label>Developer fix status<select name="fixStatus"><option selected>Not started</option><option>In progress</option><option>Fixed</option><option>Needs QA retest</option></select></label></div>
+      <label>Tester comments<textarea name="testerComments" rows="2" placeholder="Optional notes for the QA/developer handoff"></textarea></label>
+      <label>Attach screenshots (optional)<span class="field-hint">PNG, JPG or WEBP · up to 5 images, 900 KB each</span><input type="file" name="images" accept="image/png,image/jpeg,image/webp" multiple data-image-input /></label>
       <div class="image-previews" data-previews></div>
       <p class="form-message" aria-live="polite"></p>
       <button class="primary-button" type="submit">+ Save bugs</button>
@@ -596,34 +824,69 @@ function bulkBugCard() {
 
 function singleBugCard() {
   return `
-    <form data-form="bug" class="workspace-form">
-      <div class="template-banner bug-template"><span>BUG</span><div><strong>Standard bug report</strong><small>Clear reproduction steps make bugs faster to fix.</small></div></div>
-      <label>Bug title<input name="title" placeholder="e.g. Checkout button does not respond" required /></label>
-      <label>Module<input name="module" placeholder="e.g. Checkout" required /></label>
-      <label>Description<textarea name="description" rows="2" placeholder="Describe the issue and its impact" required></textarea></label>
-      <label>Steps to reproduce<textarea name="stepsToReproduce" rows="3" placeholder="1. Open checkout&#10;2. Enter a valid address&#10;3. Click Continue" required></textarea></label>
-      <label>Expected result<textarea name="expectedResult" rows="2" placeholder="What should happen?" required></textarea></label>
-      <label>Actual result<textarea name="actualResult" rows="2" placeholder="What actually happened?" required></textarea></label>
-      <div class="form-row"><label>Severity<select name="severity"><option>Critical</option><option>High</option><option selected>Medium</option><option>Low</option></select></label><label>Assign to<select name="assignee"><option>Developer</option><option>QA Test Engineer</option></select></label></div>
-      <label>Attach screenshots (optional)<input type="file" name="images" accept="image/*" multiple data-image-input /></label>
+    <form data-form="bug" class="workspace-form bug-report-form">
+      <div class="template-banner bug-template"><span>BUG</span><div><strong>Standard bug report</strong><small>Capture clear reproduction details, priority and QA status for faster fixes.</small></div></div>
+      <label class="bug-wide-field">Bug title<input name="title" placeholder="e.g. Checkout button does not respond" required /></label>
+      <div class="form-row"><label>Module<input name="module" placeholder="e.g. Checkout" required /></label><label>Priority<select name="severity"><option>Critical</option><option>High</option><option selected>Medium</option><option>Low</option></select></label></div>
+      <label class="bug-wide-field">Description<textarea name="description" rows="2" placeholder="Describe the issue and its impact" required></textarea></label>
+      <label class="bug-wide-field">Steps to reproduce<textarea name="stepsToReproduce" rows="3" placeholder="1. Open checkout&#10;2. Enter a valid address&#10;3. Click Continue" required></textarea></label>
+      <div class="form-row"><label>Expected result<textarea name="expectedResult" rows="3" placeholder="What should happen?" required></textarea></label><label>Actual result<textarea name="actualResult" rows="3" placeholder="What actually happened?" required></textarea></label></div>
+      <div class="form-row"><label>QA status<select name="status"><option selected>Open</option><option>In Progress</option><option>Fixed</option></select></label><label>Assign to<select name="assignee"><option>Developer</option><option>QA Test Engineer</option></select></label></div>
+      <div class="form-row"><label>Developer fix status<select name="fixStatus"><option selected>Not started</option><option>In progress</option><option>Fixed</option><option>Needs QA retest</option></select></label><label>Reported by<input name="reportedBy" value="${escapeHtml(state.username || "QA Test Engineer")}" required /></label></div>
+      <label class="bug-wide-field">Tester comments<textarea name="testerComments" rows="2" placeholder="Add test observations or retest notes (optional)"></textarea></label>
+      <label class="bug-wide-field">Attach screenshots (optional)<span class="field-hint">PNG, JPG or WEBP · up to 5 images, 900 KB each</span><input type="file" name="images" accept="image/png,image/jpeg,image/webp" multiple data-image-input /></label>
       <div class="image-previews" data-previews></div>
       <p class="form-message" aria-live="polite"></p>
-      <button class="primary-button" type="submit">+ Add bug to ${escapeHtml(activeProject().name)}</button>
+      <button class="primary-button" type="submit">+ Save bug report</button>
     </form>
   `;
 }
 
 function importCard(type, description) {
+  if (type === "test-cases" && state.pendingImport?.type === type) {
+    return renderImportPreview();
+  }
   return `
     <div class="import-panel">
       <p class="import-description">${description}</p>
+      ${type === "bugs" ? `<a class="bug-csv-template" download="qyntra-bug-template.csv" href="${bugCsvTemplateUrl()}">Download bug CSV template <span aria-hidden="true">↓</span></a>` : ""}
+      ${type === "test-cases" ? `<a class="bug-csv-template" download="qyntra-test-case-template.csv" href="${testCaseCsvTemplateUrl()}">Download Excel test-case template <span aria-hidden="true">↓</span></a>` : ""}
       <form data-form="import-${type}" class="workspace-form">
-        <label class="upload-zone"><span class="upload-symbol">⇧</span><strong>Choose a file to import</strong><small>CSV or JSON · rows are checked before adding</small><input type="file" data-import="${type}" accept="text/csv,.csv,.json" required /></label>
+        <label class="upload-zone"><span class="upload-symbol">⇧</span><strong>Choose a file to import</strong><small>Excel-compatible CSV or JSON · review and edit rows before saving</small><input type="file" data-import="${type}" accept="text/csv,.csv,.json" required /></label>
         <p class="form-message" aria-live="polite"></p>
-        <button class="primary-button" type="submit">Import ${type === "bugs" ? "bugs" : "test cases"}</button>
+        <button class="primary-button" type="submit">Review ${type === "bugs" ? "bugs" : "test cases"}</button>
       </form>
     </div>
   `;
+}
+
+function renderImportPreview() {
+  const records = state.pendingImport.records;
+  const fields = [
+    ["title", "Test case"],
+    ["featureName", "Feature"],
+    ["preconditions", "Prerequisites"],
+    ["testData", "Test data"],
+    ["steps", "Steps"],
+    ["expectedResult", "Expected result"],
+  ];
+  return `<section class="import-review"><div class="card-heading"><div><h2>Review imported test cases</h2><p>Edit each cell before adding ${records.length} case${records.length === 1 ? "" : "s"} to this project.</p></div></div><div class="bug-table-wrap import-preview-wrap"><table class="workspace-table import-preview-table"><thead><tr>${fields.map(([, label]) => `<th scope="col">${label}</th>`).join("")}</tr></thead><tbody>${records.map((record, index) => `<tr data-import-row="${index}">${fields.map(([field]) => `<td><textarea data-import-field="${field}" aria-label="${field} for imported row ${index + 1}" rows="3">${escapeHtml(field === "steps" ? record.steps.join("\n") : record[field] || "")}</textarea></td>`).join("")}</tr>`).join("")}</tbody></table></div><p class="form-message import-review-message" aria-live="polite"></p><div class="bug-saved-actions"><button class="primary-button" type="button" data-save-import>+ Add reviewed cases</button><button class="secondary-button" type="button" data-import-ai>✦ Review with Gemini</button><button class="secondary-button" type="button" data-cancel-import>Choose another file</button></div></section>`;
+}
+
+function bugCsvTemplateUrl() {
+  const csv = [
+    "title,module,severity,status,assignee,description,stepsToReproduce,expectedResult,actualResult,testerComments,fixStatus,reportedBy",
+    '"Checkout button does not respond","Checkout","High","Open","Developer","Checkout stops after address entry","1. Add an item to cart; 2. Enter an address; 3. Select checkout","Continue to payment","The button does not respond","Reproduced on desktop","Not started","QA Test Engineer"',
+  ].join("\r\n");
+  return `data:text/csv;charset=utf-8,${encodeURIComponent(csv)}`;
+}
+
+function testCaseCsvTemplateUrl() {
+  const csv = [
+    "Feature Name,TestCase Name,Prerequisites,Test Data,Steps,Expected Result,Test Result",
+    '"Authentication","Sign in with valid credentials","A registered account exists","Email and password","1. Open sign in; 2. Enter valid credentials; 3. Submit","The account home page is displayed","Not Run"',
+  ].join("\r\n");
+  return `data:text/csv;charset=utf-8,${encodeURIComponent(csv)}`;
 }
 
 function formCard(title, type) {
@@ -636,7 +899,30 @@ function formCard(title, type) {
 
 function sectionHeader(title, description, actionLabel) {
   const action = title.startsWith("Test Cases") ? "case" : title.startsWith("Test Plans") ? "plan" : title.startsWith("Team Notes") ? "note" : title.startsWith("Projects") ? "project" : "bug";
-  return `<div class="welcome-row"><div><span class="section-kicker">QYNTRA WORKSPACE</span><h1>${title}</h1><p>${description}</p></div><button class="primary-button" data-open-modal="${action}" type="button">+ ${actionLabel}</button></div>`;
+  const button = action === "case" || action === "bug"
+    ? `<button class="primary-button" data-action="Add New" data-add-type="${action}" type="button">+ Add New</button>`
+    : `<button class="primary-button" data-open-modal="${action}" type="button">+ ${actionLabel}</button>`;
+  return `<div class="welcome-row"><div><span class="section-kicker">QYNTRA WORKSPACE</span><h1>${title}</h1><p>${description}</p></div>${button}</div>`;
+}
+
+function newRecordPage() {
+  const activeType = state.newRecordType;
+  const options = activeType === "case"
+    ? `${testCaseTools()}${state.testCaseMode === "ai" ? aiDraftCard() : ""}`
+    : bugTools();
+  const saved = state.newRecordSaved?.type === "case"
+    ? `<section class="content-card bug-saved-card new-record-saved" role="status"><span class="bug-saved-icon" aria-hidden="true">✓</span><p class="section-kicker">TEST CASE${state.newRecordSaved.count > 1 ? "S" : ""} SAVED</p><h2>${escapeHtml(state.newRecordSaved.id)} · ${escapeHtml(state.newRecordSaved.title)}</h2><p>${state.newRecordSaved.count > 1 ? `${state.newRecordSaved.count} test cases were` : "Your test case was"} saved to ${escapeHtml(activeProject().name)}.</p><div class="bug-saved-actions"><button class="primary-button" type="button" data-new-record-followup="add">+ Add another</button><button class="secondary-button" type="button" data-new-record-followup="view">View test cases</button></div></section>`
+    : "";
+  return `
+    <div class="welcome-row"><div><span class="section-kicker">QYNTRA WORKSPACE</span><h1>Add New</h1><p>Create one record, add several with a shared template, or import a CSV/JSON file.</p></div></div>
+    <section class="new-record-page">
+      <div class="new-record-type-switch" role="tablist" aria-label="Choose record type">
+        <button class="new-record-type ${activeType === "bug" ? "selected" : ""}" type="button" role="tab" aria-selected="${activeType === "bug"}" data-new-record-type="bug"><span class="new-record-type-icon bug">!</span><span><strong>Bug report</strong><small>Reproduction, priority, QA status and screenshots</small></span><span class="new-record-type-arrow">→</span></button>
+        <button class="new-record-type ${activeType === "case" ? "selected" : ""}" type="button" role="tab" aria-selected="${activeType === "case"}" data-new-record-type="case"><span class="new-record-type-icon case">✓</span><span><strong>Test case</strong><small>Steps, test data, expected results and runs</small></span><span class="new-record-type-arrow">→</span></button>
+      </div>
+      ${saved || options}
+    </section>
+  `;
 }
 
 function renderEntryModal() {
@@ -661,7 +947,173 @@ function renderEntryModal() {
 }
 
 function bugListCard(bugs, editable, emptyMessage = "No bugs reported yet.") {
-  return `<section class="content-card"><div class="card-heading"><div><h2>${editable ? "All reported bugs" : "Developer issues"}</h2><p>${bugs.length} issue${bugs.length === 1 ? "" : "s"} · status can be updated here</p></div></div>${bugs.length ? `<div class="bug-list">${bugs.map((bug) => bugRow(bug, editable)).join("")}</div>` : emptyState(emptyMessage)}</section>`;
+  return `<section class="content-card"><div class="card-heading"><div><h2>${editable ? "All reported bugs" : "Developer issues"}</h2><p>${bugs.length} issue${bugs.length === 1 ? "" : "s"} · status can be updated here</p></div></div>${bugs.length ? `<div class="bug-table-wrap"><table class="bug-table"><thead><tr><th scope="col">Bug ID</th><th scope="col">Issue</th><th scope="col">Module</th><th scope="col">Priority</th><th scope="col">Assignee</th><th scope="col">Status</th></tr></thead><tbody>${bugs.map((bug) => bugTableRow(bug, editable)).join("")}</tbody></table></div>` : emptyState(emptyMessage)}</section>`;
+}
+
+function customDropdown(kind, value, options, ariaLabel, attributes = "") {
+  return `<div class="custom-select ${kind === "bug-status" ? "status-select" : "filter-select"}" data-custom-select data-dropdown-kind="${kind}" data-value="${escapeHtml(value)}" ${attributes}><button class="custom-select-trigger" type="button" aria-label="${escapeHtml(ariaLabel)}" aria-haspopup="listbox" aria-expanded="false"><span class="custom-select-label">${escapeHtml(value)}</span><span class="custom-select-chevron" aria-hidden="true">⌄</span></button><div class="custom-select-menu" role="listbox" aria-label="${escapeHtml(ariaLabel)}" hidden>${options.map((option) => `<button class="custom-select-option ${option.value === value ? "selected" : ""}" type="button" role="option" aria-selected="${option.value === value}" data-dropdown-option="${escapeHtml(option.value)}"><span>${escapeHtml(option.label)}</span>${option.value === value ? '<span class="custom-select-check" aria-hidden="true">✓</span>' : ""}</button>`).join("")}</div></div>`;
+}
+
+const bugStatusOptions = ["Open", "In Progress", "Fixed"].map((status) => ({ value: status, label: status }));
+const bugSeverityOptions = ["Critical", "High", "Medium", "Low"].map((severity) => ({ value: severity, label: `${severity} severity` }));
+
+function bugTableRow(bug, editable = true) {
+  const searchText = [bug.id, bug.title, bug.module, bug.assignee, bug.description].join(" ").toLowerCase();
+  const severity = bug.severity || "Medium";
+  return `
+    <tr data-bug-entry data-search="${escapeHtml(searchText)}" data-status="${escapeHtml(bug.status)}" data-severity="${escapeHtml(bug.severity)}">
+      <td><span class="bug-table-id">${escapeHtml(bug.id)}</span></td>
+      <td><div class="bug-table-title"><strong>${escapeHtml(bug.title)}</strong><details class="record-details" id="bug-report-${escapeHtml(bug.id)}" ${state.viewBugId === bug.id ? "open" : ""}><summary>View report</summary><p><b>Description:</b> ${escapeHtml(bug.description || "Not provided")}</p><p><b>Steps:</b> ${escapeHtml(bug.stepsToReproduce || "Not provided")}</p><p><b>Expected:</b> ${escapeHtml(bug.expectedResult || "Not provided")}</p><p><b>Actual:</b> ${escapeHtml(bug.actualResult || "Not provided")}</p><p><b>Priority:</b> ${escapeHtml(bug.severity || "Medium")}</p><p><b>QA status:</b> ${escapeHtml(bug.status || "Open")}</p><p><b>Reported by:</b> ${escapeHtml(bug.reportedBy || "QA Test Engineer")}</p><p><b>Tester comments:</b> ${escapeHtml(bug.testerComments || "Not provided")}</p><p><b>Developer fix status:</b> ${escapeHtml(bug.fixStatus || "Not started")}</p><p><b>Developer comments:</b> ${escapeHtml(bug.developerComments || "Not provided")}</p>${attachmentStrip(bug.attachments)}</details></div></td>
+      <td>${escapeHtml(bug.module || "—")}</td>
+      <td><span class="severity ${escapeHtml(severity.toLowerCase())}">${escapeHtml(severity)}</span></td>
+      <td>${escapeHtml(bug.assignee || "Unassigned")}</td>
+      <td>${editable ? customDropdown("bug-status", bug.status || "Open", bugStatusOptions, `Update ${bug.id} status`, `data-bug-status="${escapeHtml(bug.id)}"`) : `<span class="bug-status ${statusClass(bug.status)}">${escapeHtml(bug.status)}</span>`}</td>
+    </tr>
+  `;
+}
+
+function bugTrackerContent(bugs) {
+  const open = bugs.filter((bug) => bug.status === "Open").length;
+  const inProgress = bugs.filter((bug) => bug.status === "In Progress").length;
+  const highPriority = bugs.filter((bug) => bug.severity === "Critical" || bug.severity === "High").length;
+  return `
+    <section class="bug-tracker">
+      <div class="bug-summary-grid" aria-label="Bug summary">
+        <article class="bug-summary-card"><span class="bug-summary-icon total">#</span><div><span>Total issues</span><strong>${bugs.length}</strong></div></article>
+        <article class="bug-summary-card"><span class="bug-summary-icon open">!</span><div><span>Open</span><strong>${open}</strong></div></article>
+        <article class="bug-summary-card"><span class="bug-summary-icon progress">↻</span><div><span>In progress</span><strong>${inProgress}</strong></div></article>
+        <article class="bug-summary-card"><span class="bug-summary-icon priority">↑</span><div><span>Critical &amp; high</span><strong>${highPriority}</strong></div></article>
+      </div>
+      <section class="content-card bug-tracker-card">
+        <div class="bug-tracker-heading"><div><h2>All issues</h2><p>Search, review and update issues for ${escapeHtml(activeProject().name)}.</p></div><span class="bug-result-count" data-bug-result-count>${bugs.length} issues</span></div>
+        <div class="bug-filter-bar">
+          <label class="bug-search-field"><span class="sr-only">Search bugs</span><span aria-hidden="true">⌕</span><input type="search" data-bug-search placeholder="Search by title, ID, module..." value="${escapeHtml(state.bugSearch)}" /></label>
+          <div class="bug-filter-dropdown" aria-label="Filter by status">${customDropdown("filter-status", state.bugStatusFilter, [{ value: "All statuses", label: "All statuses" }, ...bugStatusOptions], "Filter by status", 'data-bug-filter="status"')}</div>
+          <div class="bug-filter-dropdown" aria-label="Filter by severity">${customDropdown("filter-severity", state.bugSeverityFilter, [{ value: "All severities", label: "All severities" }, ...bugSeverityOptions], "Filter by severity", 'data-bug-filter="severity"')}</div>
+        </div>
+        ${bugs.length ? `<div class="bug-table-wrap"><table class="bug-table"><thead><tr><th scope="col">Bug ID</th><th scope="col">Issue</th><th scope="col">Module</th><th scope="col">Severity</th><th scope="col">Assignee</th><th scope="col">Status</th></tr></thead><tbody>${bugs.map(bugTableRow).join("")}</tbody></table></div><p class="bug-filter-empty" data-bug-filter-empty hidden>No issues match these filters. Try a different search or filter.</p>` : emptyState("No bugs reported yet. Add your first issue to get started.")}
+      </section>
+    </section>
+  `;
+}
+
+function applyBugFilters() {
+  const search = document.querySelector("[data-bug-search]");
+  const status = document.querySelector('[data-custom-select][data-bug-filter="status"]');
+  const severity = document.querySelector('[data-custom-select][data-bug-filter="severity"]');
+  if (!search || !status || !severity) return;
+
+  state.bugSearch = search.value.trim().toLowerCase();
+  state.bugStatusFilter = status.dataset.value;
+  state.bugSeverityFilter = severity.dataset.value;
+  const rows = Array.from(document.querySelectorAll("[data-bug-entry]"));
+  let visibleCount = 0;
+  rows.forEach((row) => {
+    const matches = row.dataset.search.includes(state.bugSearch)
+      && (state.bugStatusFilter === "All statuses" || row.dataset.status === state.bugStatusFilter)
+      && (state.bugSeverityFilter === "All severities" || row.dataset.severity === state.bugSeverityFilter);
+    row.hidden = !matches;
+    if (matches) visibleCount += 1;
+  });
+  const resultCount = document.querySelector("[data-bug-result-count]");
+  resultCount.textContent = `${visibleCount} of ${rows.length} issue${rows.length === 1 ? "" : "s"}`;
+  const empty = document.querySelector("[data-bug-filter-empty]");
+  if (empty) empty.hidden = visibleCount > 0;
+}
+
+let dropdownOutsideHandlerInstalled = false;
+const customDropdownMenus = new WeakMap();
+
+function closeCustomDropdown(dropdown) {
+  const menu = customDropdownMenus.get(dropdown);
+  if (!menu) return;
+  dropdown.classList.remove("is-open");
+  dropdown.querySelector(".custom-select-trigger").setAttribute("aria-expanded", "false");
+  menu.hidden = true;
+}
+
+function openCustomDropdown(dropdown) {
+  document.querySelectorAll(".custom-select.is-open").forEach(closeCustomDropdown);
+  const trigger = dropdown.querySelector(".custom-select-trigger");
+  const menu = customDropdownMenus.get(dropdown);
+  if (!menu) return;
+  dropdown.classList.add("is-open");
+  trigger.setAttribute("aria-expanded", "true");
+  menu.hidden = false;
+
+  const triggerRect = trigger.getBoundingClientRect();
+  const menuRect = menu.getBoundingClientRect();
+  const left = Math.max(8, Math.min(triggerRect.left, window.innerWidth - menuRect.width - 8));
+  const top = Math.max(8, Math.min(triggerRect.bottom + 5, window.innerHeight - menuRect.height - 8));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  menu.style.minWidth = `${triggerRect.width}px`;
+  menu.querySelector('[aria-selected="true"]')?.focus();
+}
+
+function setupCustomDropdowns() {
+  document.querySelectorAll("[data-custom-select]").forEach((dropdown) => {
+    const trigger = dropdown.querySelector(".custom-select-trigger");
+    const menu = dropdown.querySelector(".custom-select-menu");
+    menu.dataset.portaled = "true";
+    customDropdownMenus.set(dropdown, menu);
+    document.body.append(menu);
+    trigger.addEventListener("click", () => {
+      if (dropdown.classList.contains("is-open")) {
+        closeCustomDropdown(dropdown);
+      } else {
+        openCustomDropdown(dropdown);
+      }
+    });
+    trigger.addEventListener("keydown", (event) => {
+      if (event.key === "ArrowDown" || event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        openCustomDropdown(dropdown);
+      }
+    });
+    menu.querySelectorAll("[data-dropdown-option]").forEach((option) => {
+      option.addEventListener("click", () => {
+        dropdown.dataset.value = option.dataset.dropdownOption;
+        trigger.querySelector(".custom-select-label").textContent = option.querySelector("span").textContent;
+        menu.querySelectorAll("[data-dropdown-option]").forEach((item) => {
+          const selected = item === option;
+          item.classList.toggle("selected", selected);
+          item.setAttribute("aria-selected", String(selected));
+          item.querySelector(".custom-select-check")?.remove();
+          if (selected) item.insertAdjacentHTML("beforeend", '<span class="custom-select-check" aria-hidden="true">✓</span>');
+        });
+        closeCustomDropdown(dropdown);
+        if (dropdown.dataset.dropdownKind === "bug-status") {
+          updateBugStatus(dropdown.dataset.bugStatus, dropdown.dataset.value);
+        } else {
+          applyBugFilters();
+        }
+      });
+    });
+    dropdown.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        closeCustomDropdown(dropdown);
+        trigger.focus();
+      }
+    });
+    menu.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        closeCustomDropdown(dropdown);
+        trigger.focus();
+      }
+    });
+  });
+  if (!dropdownOutsideHandlerInstalled) {
+    document.addEventListener("pointerdown", (event) => {
+      if (!event.target.closest("[data-custom-select], .custom-select-menu")) {
+        document.querySelectorAll(".custom-select.is-open").forEach(closeCustomDropdown);
+      }
+    });
+    document.addEventListener("scroll", () => {
+      document.querySelectorAll(".custom-select.is-open").forEach(closeCustomDropdown);
+    }, true);
+    dropdownOutsideHandlerInstalled = true;
+  }
 }
 
 function notesCard() {
@@ -710,13 +1162,25 @@ async function readDocumentAttachments(files, existingCount = 0) {
 function showImagePreviews(input) {
   const container = input.closest("form, .ai-panel")?.querySelector("[data-previews]");
   if (!container) return;
+  for (const url of imagePreviewUrls.get(container) || []) URL.revokeObjectURL(url);
   container.replaceChildren();
+  const urls = [];
   Array.from(input.files || []).forEach((file) => {
-    const item = document.createElement("span");
-    item.className = "preview-file";
-    item.textContent = `▧ ${file.name}`;
-    container.append(item);
+    const url = URL.createObjectURL(file);
+    urls.push(url);
+    const link = document.createElement("a");
+    link.className = "image-preview-link";
+    link.href = url;
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.title = `Preview ${file.name}`;
+    const image = document.createElement("img");
+    image.src = url;
+    image.alt = file.name;
+    link.append(image);
+    container.append(link);
   });
+  imagePreviewUrls.set(container, urls);
 }
 
 function showDocumentPreviews(input) {
@@ -780,6 +1244,9 @@ async function handleFormSubmit(event) {
         state.workspace.testCases[index] = testCase;
       } else {
         state.workspace.testCases.unshift(testCase);
+        if (state.section === "Add New") {
+          state.newRecordSaved = { type: "case", id: testCase.id, title: testCase.title, count: 1 };
+        }
       }
       state.editingTestCaseId = "";
     } else if (form.dataset.form === "bulk-cases") {
@@ -809,34 +1276,28 @@ async function handleFormSubmit(event) {
         actualResult: "",
         attachments,
       })));
+      if (state.section === "Add New") {
+        state.newRecordSaved = { type: "case", id: ids[0], title: titles[0], count: ids.length };
+      }
     } else if (form.dataset.form === "ai-cases") {
-      const titles = splitLines(values.lines);
-      const ids = nextIds("TC", state.workspace.testCases, titles.length);
-      state.workspace.testCases.unshift(...titles.map((title, index) => ({
+      const drafts = readAiDraftForm(form);
+      const ids = nextIds("TC", state.workspace.testCases, drafts.length);
+      state.workspace.testCases.unshift(...drafts.map((draft, index) => ({
         id: ids[index],
         projectId: state.activeProjectId,
-        title,
-        featureName: values.featureName.trim() || state.aiDrafts[index]?.featureName || "General",
-        module: values.featureName.trim() || state.aiDrafts[index]?.featureName || "General",
-        priority: "Medium",
-        status: state.aiDrafts[index]?.testResult || "Not Run",
-        testResult: state.aiDrafts[index]?.testResult || "Not Run",
-        preconditions: state.aiDrafts[index]?.preconditions || "",
-        steps: state.aiDrafts[index]?.steps || [],
-        testData: state.aiDrafts[index]?.testData || "",
-        expectedResult: state.aiDrafts[index]?.expectedResult || "",
-        bugDescription: state.aiDrafts[index]?.bugDescription || "",
-        testerComments: state.aiDrafts[index]?.testerComments || "",
-        developerComments: state.aiDrafts[index]?.developerComments || "",
-        fixStatusIT1: state.aiDrafts[index]?.fixStatusIT1 || "",
-        testResultIT2: state.aiDrafts[index]?.testResultIT2 || "",
-        fixStatusIT2: state.aiDrafts[index]?.fixStatusIT2 || "",
-        testResultIT3: state.aiDrafts[index]?.testResultIT3 || "",
-        actualResult: state.aiDrafts[index]?.actualResult || "Not run",
+        ...draft,
+        module: draft.featureName,
+        priority: draft.priority || "Medium",
+        status: draft.testResult || "Not Run",
         attachments: state.aiAttachments,
       })));
+      if (state.section === "Add New") {
+        state.newRecordSaved = { type: "case", id: ids[0], title: drafts[0].title, count: ids.length };
+      }
       state.aiAttachments = [];
       state.aiDrafts = [];
+      state.aiChatMessages = [];
+      state.aiChatHistory = [];
     } else if (form.dataset.form === "bulk-bugs") {
       const attachments = await readImageAttachments(form.elements.images.files);
       const titles = splitLines(values.lines);
@@ -848,16 +1309,21 @@ async function handleFormSubmit(event) {
         module: values.module.trim(),
         severity: values.severity,
         assignee: values.assignee,
-        status: "Open",
+        status: values.status,
+        fixStatus: values.fixStatus,
+        reportedBy: state.username || "QA Test Engineer",
+        testerComments: values.testerComments.trim(),
         description: values.description.trim(),
         stepsToReproduce: values.stepsToReproduce.trim(),
         expectedResult: values.expectedResult.trim(),
         actualResult: values.actualResult.trim(),
         attachments,
       })));
+      state.bugSavedId = ids[0];
+      state.bugSavedCount = ids.length;
     } else if (form.dataset.form === "bug") {
       const attachments = await readImageAttachments(form.elements.images.files);
-      state.workspace.bugs.unshift({
+      const bug = {
         id: nextId("BUG", state.workspace.bugs),
         projectId: state.activeProjectId,
         title: values.title.trim(),
@@ -868,9 +1334,15 @@ async function handleFormSubmit(event) {
         actualResult: values.actualResult.trim(),
         severity: values.severity,
         assignee: values.assignee,
-        status: "Open",
+        status: values.status,
+        fixStatus: values.fixStatus,
+        reportedBy: values.reportedBy.trim(),
+        testerComments: values.testerComments.trim(),
         attachments,
-      });
+      };
+      state.workspace.bugs.unshift(bug);
+      state.bugSavedId = bug.id;
+      state.bugSavedCount = 1;
     } else if (form.dataset.form === "plan") {
       state.workspace.testPlans.unshift({ id: nextId("PLAN", state.workspace.testPlans), projectId: state.activeProjectId, title: values.title.trim(), scope: values.scope.trim(), date: values.date });
     } else if (form.dataset.form === "note") {
@@ -888,7 +1360,7 @@ async function handleFormSubmit(event) {
       await importFile(form, message);
       return;
     }
-    state.modal = "";
+    if (form.dataset.form !== "bug" && form.dataset.form !== "bulk-bugs") state.modal = "";
     saveWorkspace();
     renderDashboard();
   } catch (error) {
@@ -916,7 +1388,24 @@ async function importFile(form, message) {
     const module = String(record.module || "General").trim();
     if (!title) throw new Error(`Row ${index + 1} is missing a title.`);
     return isBugImport
-      ? { id: "", projectId: state.activeProjectId, title, module, severity: normalizeChoice(record.severity, ["Critical", "High", "Medium", "Low"], "Medium"), assignee: normalizeChoice(record.assignee, ["Developer", "QA Test Engineer"], "Developer"), status: "Open", description: String(record.description || "").trim(), stepsToReproduce: String(record.stepsToReproduce || ""), expectedResult: String(record.expectedResult || ""), actualResult: String(record.actualResult || ""), attachments: [] }
+      ? {
+        id: "",
+        projectId: state.activeProjectId,
+        title,
+        module,
+        severity: normalizeChoice(record.severity || record.priority, ["Critical", "High", "Medium", "Low"], "Medium"),
+        assignee: normalizeChoice(record.assignee, ["Developer", "QA Test Engineer"], "Developer"),
+        status: normalizeChoice(record.status, ["Open", "In Progress", "Fixed"], "Open"),
+        description: String(record.description || "").trim(),
+        stepsToReproduce: String(record.stepsToReproduce || ""),
+        expectedResult: String(record.expectedResult || ""),
+        actualResult: String(record.actualResult || ""),
+        testerComments: String(record.testerComments || ""),
+        fixStatus: normalizeChoice(record.fixStatus === "Needs retest" ? "Needs QA retest" : record.fixStatus, ["Not started", "In progress", "Fixed", "Needs QA retest"], "Not started"),
+        reportedBy: capitalizeQa(String(record.reportedBy || "QA Test Engineer").trim()),
+        developerComments: String(record.developerComments || ""),
+        attachments: [],
+      }
       : {
         id: "",
         projectId: state.activeProjectId,
@@ -927,7 +1416,9 @@ async function importFile(form, message) {
         status: normalizeChoice(record.testResult || record.status, ["Not Run", "Pending", "Passed", "Failed", "Blocked"], "Not Run"),
         testResult: normalizeChoice(record.testResult || record.status, ["Not Run", "Pending", "Passed", "Failed", "Blocked"], "Not Run"),
         preconditions: String(record.preconditions || ""),
-        steps: splitLines(record.steps || "Review the feature"),
+        steps: Array.isArray(record.steps)
+          ? record.steps.map(String)
+          : splitLines(record.steps || "Review the feature"),
         testData: String(record.testData || ""),
         expectedResult: String(record.expectedResult || ""),
         bugDescription: String(record.bugDescription || ""),
@@ -942,13 +1433,93 @@ async function importFile(form, message) {
       };
   });
   if (!normalized.length) throw new Error("The selected file has no data rows.");
+  if (!isBugImport) {
+    state.pendingImport = { type: "test-cases", records: normalized };
+    state.aiChatMessages = [];
+    state.aiChatHistory = [];
+    state.aiDrafts = [];
+    state.section = "Add New";
+    state.newRecordType = "case";
+    state.testCaseMode = "import";
+    state.modal = "";
+    renderDashboard();
+    return;
+  }
   const ids = nextIds(isBugImport ? "BUG" : "TC", isBugImport ? state.workspace.bugs : state.workspace.testCases, normalized.length);
   normalized.forEach((record, index) => { record.id = ids[index]; });
-  if (isBugImport) state.workspace.bugs.unshift(...normalized);
-  else state.workspace.testCases.unshift(...normalized);
+  if (isBugImport) {
+    state.workspace.bugs.unshift(...normalized);
+    state.bugSavedId = ids[0];
+    state.bugSavedCount = ids.length;
+  } else {
+    state.workspace.testCases.unshift(...normalized);
+    if (state.section === "Add New") {
+      state.newRecordSaved = { type: "case", id: ids[0], title: normalized[0].title, count: ids.length };
+    }
+  }
   state.modal = "";
   saveWorkspace();
   renderDashboard();
+}
+
+function readAiDraftForm(form) {
+  const drafts = Array.from(form.querySelectorAll("[data-ai-case-index]"), (row) => {
+    const value = (field) => row.querySelector(`[data-ai-field="${field}"]`).value.trim();
+    return {
+      ...state.aiDrafts[Number(row.dataset.aiCaseIndex)],
+      featureName: value("featureName") || "General",
+      title: value("title"),
+      preconditions: value("preconditions"),
+      testData: value("testData"),
+      steps: splitLines(value("steps")),
+      expectedResult: value("expectedResult"),
+    };
+  });
+  if (!drafts.length) throw new Error("Generate at least one test case before adding it.");
+  if (drafts.some((draft) => !draft.title || !draft.expectedResult)) {
+    throw new Error("Each test case needs a title and expected result.");
+  }
+  state.aiDrafts = drafts;
+  return drafts;
+}
+
+function saveImportedTestCases() {
+  const review = document.querySelector(".import-review");
+  const message = review.querySelector(".import-review-message");
+  try {
+    const rows = Array.from(review.querySelectorAll("[data-import-row]"));
+    const records = rows.map((row) => {
+      const record = { ...state.pendingImport.records[Number(row.dataset.importRow)] };
+      row.querySelectorAll("[data-import-field]").forEach((field) => {
+        const name = field.dataset.importField;
+        record[name] = name === "steps" ? splitLines(field.value) : field.value.trim();
+      });
+      return record;
+    });
+    if (!records.length || records.some((record) => !record.title || !record.expectedResult || !record.steps.length)) {
+      throw new Error("Every imported case needs a title, steps, and expected result.");
+    }
+    const ids = nextIds("TC", state.workspace.testCases, records.length);
+    const saved = records.map((record, index) => ({
+      ...record,
+      id: ids[index],
+      projectId: state.activeProjectId,
+      module: record.featureName || "General",
+      testResult: record.testResult || "Not Run",
+      status: record.testResult || "Not Run",
+      attachments: [],
+    }));
+    state.workspace.testCases.unshift(...saved);
+    state.newRecordSaved = state.section === "Add New"
+      ? { type: "case", id: ids[0], title: saved[0].title, count: ids.length }
+      : null;
+    state.pendingImport = null;
+    saveWorkspace();
+    renderDashboard();
+  } catch (error) {
+    message.textContent = error.message || "Could not save the imported test cases.";
+    message.classList.add("error");
+  }
 }
 
 function normalizeChoice(value, choices, fallback) {
@@ -1018,6 +1589,9 @@ function parseCsvRecords(text) {
     status: "status",
     severity: "severity",
     assignee: "assignee",
+    reportedby: "reportedBy",
+    fixstatus: "fixStatus",
+    priority: "priority",
     description: "description",
     stepstoreproduce: "stepsToReproduce",
   };
@@ -1031,83 +1605,143 @@ function parseCsvRecords(text) {
   return rows.map((cells) => Object.fromEntries(headers.map((header, index) => [header, cells[index] || ""])));
 }
 
-async function generateAiDrafts() {
-  const prompt = document.querySelector("#ai-prompt").value.trim();
-  const files = document.querySelector("#ai-images").files;
-  const result = document.querySelector(".ai-result");
+function renderAiMessages() {
+  return state.aiChatMessages.map((message) => `<div class="ai-chat-message ${message.role === "user" ? "user" : "assistant"}"><strong>${message.role === "user" ? "You" : "Gemini"}</strong><p>${escapeHtml(message.text)}</p>${message.images?.length ? `<div class="ai-chat-attachments">${message.images.map((image) => `<span class="preview-file">▧ ${escapeHtml(image.name)}</span>`).join("")}</div>` : ""}</div>`).join("")
+    || `<div class="ai-chat-empty">Start a conversation with Gemini. Attach a screen image and ask for a QA test-case spreadsheet.</div>`;
+}
+
+function renderAiDraftTable() {
+  if (!state.aiDrafts.length) return `<div class="ai-chat-empty">Generated test cases will appear here for review and editing.</div>`;
+  const fields = [
+    ["featureName", "Feature"],
+    ["title", "Test case"],
+    ["preconditions", "Prerequisites"],
+    ["testData", "Test data"],
+    ["steps", "Steps"],
+    ["expectedResult", "Expected result"],
+  ];
+  return `<div class="ai-spreadsheet-actions"><span>${state.aiDrafts.length} editable test cases</span><button class="secondary-button" type="button" data-download-ai-cases>Download Excel CSV</button></div><div class="bug-table-wrap ai-spreadsheet-wrap"><form data-form="ai-cases" class="workspace-form ai-spreadsheet-form"><table class="workspace-table ai-spreadsheet"><thead><tr>${fields.map(([, label]) => `<th scope="col">${label}</th>`).join("")}</tr></thead><tbody>${state.aiDrafts.map((draft, index) => `<tr data-ai-case-index="${index}">${fields.map(([field]) => `<td><textarea data-ai-field="${field}" aria-label="${field} for test case ${index + 1}" rows="3" ${field === "title" ? "required" : ""}>${escapeHtml(field === "steps" ? draft.steps.join("\n") : draft[field] || "")}</textarea></td>`).join("")}</tr>`).join("")}</tbody></table><p class="form-message" aria-live="polite"></p><button class="primary-button" type="submit">+ Add reviewed cases to Test Cases</button></form></div>`;
+}
+
+async function sendGeminiMessage(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const promptInput = form.querySelector("#ai-prompt");
+  const imageInput = form.querySelector("#ai-images");
+  const result = form.querySelector(".ai-result");
+  const prompt = promptInput.value.trim();
   if (!prompt) {
-    result.textContent = "Describe the screen's expected behavior first.";
+    result.textContent = "Enter a message for Gemini first.";
     result.classList.add("error");
     return;
   }
-  if (!files.length) {
-    result.textContent = "Upload at least one screen image for AI analysis.";
+  if (state.aiChatHistory.length >= 12) {
+    result.textContent = "Start a new Gemini chat to continue; the current conversation has reached its context limit.";
     result.classList.add("error");
     return;
   }
-  const generateButton = document.querySelector("#generate-ai-cases");
-  generateButton.disabled = true;
-  result.textContent = "Sending screenshot to the Qyntra AI service...";
+  const sendButton = form.querySelector("#generate-ai-cases");
+  sendButton.disabled = true;
+  result.textContent = "Gemini is reviewing your request...";
   result.classList.remove("error");
   try {
-    state.aiAttachments = await readImageAttachments(files);
+    const attachments = await readImageAttachments(imageInput.files);
     const response = await fetch("/api/generate-test-cases", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt, images: state.aiAttachments.map((image) => image.data) }),
+      body: JSON.stringify({
+        prompt,
+        images: attachments.map((image) => image.data),
+        history: state.aiChatHistory,
+      }),
     });
     const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || "The AI service could not generate test cases.");
-    if (!Array.isArray(payload.testCases) || payload.testCases.length === 0) {
-      throw new Error("The AI service returned no test cases. Try a clearer screenshot or description.");
-    }
-    state.aiDrafts = payload.testCases.map((draft) => ({
-      title: String(draft.title || "").trim(),
-      featureName: String(draft.featureName || "General"),
-      testResult: String(draft.testResult || "Not Run"),
-      preconditions: String(draft.preconditions || ""),
-      steps: Array.isArray(draft.steps) ? draft.steps.map(String) : [],
-      testData: String(draft.testData || ""),
-      expectedResult: String(draft.expectedResult || ""),
-      bugDescription: String(draft.bugDescription || ""),
-      testerComments: String(draft.testerComments || ""),
-      developerComments: String(draft.developerComments || ""),
-      fixStatusIT1: String(draft.fixStatusIT1 || ""),
-      testResultIT2: String(draft.testResultIT2 || ""),
-      fixStatusIT2: String(draft.fixStatusIT2 || ""),
-      testResultIT3: String(draft.testResultIT3 || ""),
-      actualResult: String(draft.actualResult || "Not run"),
+    if (!response.ok) throw new Error(payload.error || "Gemini could not respond. Please try again.");
+    if (!Array.isArray(payload.testCases)) throw new Error("Gemini returned an invalid test-case response.");
+    const assistantMessage = String(payload.assistantMessage || "I reviewed your request. You can refine the test cases or save the current spreadsheet.");
+    const caseContext = payload.testCases.map((testCase) => ({
+      featureName: testCase.featureName,
+      title: testCase.title,
+      preconditions: testCase.preconditions,
+      steps: testCase.steps,
+      expectedResult: testCase.expectedResult,
     }));
+    const assistantContext = `${assistantMessage}\nCurrent generated test cases: ${JSON.stringify(caseContext)}`.slice(0, 3_900);
+    state.aiChatHistory.push({ role: "user", text: prompt }, { role: "model", text: assistantContext });
+    state.aiChatMessages.push({ role: "user", text: prompt, images: attachments }, { role: "assistant", text: assistantMessage });
+    if (payload.testCases.length) {
+      state.aiDrafts = payload.testCases.map((draft) => ({
+        title: String(draft.title || "").trim(),
+        featureName: String(draft.featureName || "General"),
+        testResult: String(draft.testResult || "Not Run"),
+        priority: String(draft.priority || "Medium"),
+        preconditions: String(draft.preconditions || ""),
+        steps: Array.isArray(draft.steps) ? draft.steps.map(String) : [],
+        testData: String(draft.testData || ""),
+        expectedResult: String(draft.expectedResult || ""),
+        bugDescription: String(draft.bugDescription || ""),
+        testerComments: String(draft.testerComments || ""),
+        developerComments: String(draft.developerComments || ""),
+        fixStatusIT1: String(draft.fixStatusIT1 || ""),
+        testResultIT2: String(draft.testResultIT2 || ""),
+        fixStatusIT2: String(draft.fixStatusIT2 || ""),
+        testResultIT3: String(draft.testResultIT3 || ""),
+        actualResult: String(draft.actualResult || "Not run"),
+      }));
+    }
+    state.aiAttachments = attachments;
+    state.aiPromptDraft = "";
+    promptInput.value = "";
+    imageInput.value = "";
+    showImagePreviews(imageInput);
+    document.querySelector("#ai-chat-messages").innerHTML = renderAiMessages();
+    const results = document.querySelector("#ai-draft-results");
+    results.innerHTML = renderAiDraftTable();
+    const draftsForm = results.querySelector('form[data-form="ai-cases"]');
+    if (draftsForm) draftsForm.addEventListener("submit", handleFormSubmit);
+    results.querySelector("[data-download-ai-cases]")?.addEventListener("click", downloadAiCases);
+    result.textContent = state.aiDrafts.length
+      ? `${state.aiDrafts.length} test cases are ready in the editable spreadsheet.`
+      : "Gemini replied. Add a request for test cases whenever you are ready.";
+    document.querySelector("#ai-chat-messages")?.lastElementChild?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   } catch (error) {
     result.textContent = error instanceof TypeError
-      ? "Could not reach the AI service. Start the Qyntra backend and open http://localhost:8080."
+      ? "Could not reach Gemini. Start the Qyntra server at http://localhost:8080 and check its internet connection."
       : error.message;
     result.classList.add("error");
-    generateButton.disabled = false;
-    return;
+  } finally {
+    sendButton.disabled = false;
   }
-  const drafts = state.aiDrafts;
-  const container = document.querySelector("#ai-draft-results");
-  container.innerHTML = `
-    <div class="ai-disclosure">OpenAI analyzed the uploaded screenshot and description. Review each generated scenario before adding it.</div>
-    <div class="ai-case-previews">${drafts.map((draft, index) => `<article class="ai-case-preview"><span>AI DRAFT ${String(index + 1).padStart(2, "0")}</span><strong>${escapeHtml(draft.title)}</strong><p><b>Preconditions:</b> ${escapeHtml(draft.preconditions || "None specified")}</p>${draft.steps.length ? `<ol>${draft.steps.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol>` : ""}<p><b>Test data:</b> ${escapeHtml(draft.testData || "Define per environment")}</p><p><b>Expected:</b> ${escapeHtml(draft.expectedResult)}</p><p><b>Actual:</b> ${escapeHtml(draft.actualResult)}</p></article>`).join("")}</div>
-    <form data-form="ai-cases" class="workspace-form">
-      <label>Edit test case titles<textarea name="lines" rows="5" required>${drafts.map((draft) => escapeHtml(draft.title)).join("\n")}</textarea></label>
-      <label>Feature Name<input name="featureName" value="${escapeHtml(drafts[0]?.featureName || "General")}" required /></label>
-      <div class="image-previews">${state.aiAttachments.map((image) => `<span class="preview-file">▧ ${escapeHtml(image.name)}</span>`).join("") || '<span class="field-hint">No screenshots attached</span>'}</div>
-      <p class="form-message" aria-live="polite"></p>
-      <button class="primary-button" type="submit">+ Add drafts to test cases</button>
-    </form>
-  `;
-  container.querySelector("form").addEventListener("submit", handleFormSubmit);
-  container.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  result.textContent = `${drafts.length} test case drafts ready. Review them below.`;
-  generateButton.disabled = false;
+}
+
+function csvCell(value) {
+  const text = String(value ?? "");
+  const safe = /^[\t\r ]*[=+\-@]/.test(text) ? `'${text}` : text;
+  return `"${safe.replace(/"/g, '""')}"`;
+}
+
+function downloadAiCases() {
+  const spreadsheetForm = document.querySelector("#ai-draft-results form[data-form='ai-cases']");
+  if (spreadsheetForm) readAiDraftForm(spreadsheetForm);
+  const headers = ["Feature Name", "TestCase Name", "Prerequisites", "Test Data", "Steps", "Expected Result", "Test Result", "Actual Result", "Bug Description", "Tester Comments", "Developer Comments", "Fix status IT1", "Test Result IT2", "Fix status IT2", "Test Result IT3"];
+  const rows = state.aiDrafts.map((draft) => [
+    draft.featureName, draft.title, draft.preconditions, draft.testData, draft.steps.join("\n"), draft.expectedResult,
+    draft.testResult || "Not Run", draft.actualResult || "Not run", draft.bugDescription, draft.testerComments,
+    draft.developerComments, draft.fixStatusIT1, draft.testResultIT2, draft.fixStatusIT2, draft.testResultIT3,
+  ]);
+  const csv = `\ufeff${[headers, ...rows].map((row) => row.map(csvCell).join(",")).join("\r\n")}`;
+  const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "qyntra-gemini-test-cases.csv";
+  link.click();
+  URL.revokeObjectURL(url);
 }
 
 function notesCard() {
   const notes = projectItems("notes");
-  return `<section class="content-card"><div class="card-heading"><div><h2>${escapeHtml(activeProject().name)} notes</h2><p>${notes.length} notes in this project</p></div></div>${notes.length ? `<div class="notes-grid">${notes.map((note) => `<article class="note-card"><span>${escapeHtml(note.date)}</span><h3>${escapeHtml(note.title)}</h3><p>${escapeHtml(note.body)}</p><small>Added by ${escapeHtml(note.author)}</small></article>`).join("")}</div>` : emptyState("Add a note to share useful testing context with this project.")}</section>`;
+  const rows = notes.map((note) => `<tr><td><span class="record-table-id">${escapeHtml(note.date || "—")}</span></td><td><strong>${escapeHtml(note.title)}</strong></td><td class="note-table-body">${escapeHtml(note.body)}</td><td>${escapeHtml(note.author || "—")}</td></tr>`).join("");
+  return `<section class="content-card"><div class="card-heading"><div><h2>${escapeHtml(activeProject().name)} notes</h2><p>${notes.length} notes in this project</p></div></div>${notes.length ? `<div class="bug-table-wrap"><table class="workspace-table"><thead><tr><th scope="col">Date</th><th scope="col">Title</th><th scope="col">Note</th><th scope="col">Added by</th></tr></thead><tbody>${rows}</tbody></table></div>` : emptyState("Add a note to share useful testing context with this project.")}</section>`;
 }
 
 function updateBugStatus(id, status) {
@@ -1139,7 +1773,7 @@ function statusClass(status) {
 }
 
 function iconForSection(section) {
-  const icons = { Overview: "home", "Test Cases": "cases", Bugs: "bugs", "Assigned Bugs": "queue", "Test Plans": "plans", Notes: "notes", Projects: "home" };
+  const icons = { Overview: "home", "Add New": "plus", "Test Cases": "cases", Bugs: "bugs", "Assigned Bugs": "queue", "Test Plans": "plans", Notes: "notes", Projects: "home" };
   return icon(icons[section]);
 }
 

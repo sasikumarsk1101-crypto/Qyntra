@@ -20,12 +20,12 @@ try {
     [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordPointer)
   }
 
-  if ([string]::IsNullOrWhiteSpace($env:OPENAI_API_KEY)) {
-    $secureKey = Read-Host "OpenAI API key (press Enter to run without AI)" -AsSecureString
+  if ([string]::IsNullOrWhiteSpace($env:GEMINI_API_KEY)) {
+    $secureKey = Read-Host "Google Gemini API key (press Enter to run without AI)" -AsSecureString
     if ($secureKey.Length -gt 0) {
       $keyPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureKey)
       try {
-        $env:OPENAI_API_KEY = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($keyPointer)
+        $env:GEMINI_API_KEY = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($keyPointer)
       } finally {
         [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($keyPointer)
       }
@@ -47,7 +47,7 @@ try {
   if ($locationPushed) {
     Pop-Location
   }
-  Remove-Item Env:OPENAI_API_KEY -ErrorAction SilentlyContinue
+  Remove-Item Env:GEMINI_API_KEY -ErrorAction SilentlyContinue
   Remove-Item Env:QYNTRA_DEVELOPER_USERNAME -ErrorAction SilentlyContinue
   Remove-Item Env:QYNTRA_DEVELOPER_PASSWORD -ErrorAction SilentlyContinue
 }
